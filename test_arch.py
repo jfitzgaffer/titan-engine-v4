@@ -1,5 +1,5 @@
 import sys
-from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout
+from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout
 from PySide6.QtCore import Signal
 
 from models.project import Project, Track, SubTrack, Clip, ParameterSet, VirtualPixel, SpatialSegment
@@ -8,45 +8,52 @@ from compositor import CompositorEngine
 from playback import PlaybackController
 from widgets.visualizer import VisualizerWidget
 from widgets.timeline import TimelineWidget
+from widgets.track_header import TrackHeaderPanel
 
 
 class MainAppWindow(QWidget):
-    # This Signal is our thread-safe bridge!
     frame_received = Signal(float, bytearray)
 
     def __init__(self, project, mapper, compositor):
         super().__init__()
         self.setWindowTitle("Titan Engine V4 - DAW Mode")
+        self.resize(1000, 300)  # Made the window slightly wider to fit the left panel
 
-        # Make the window much smaller and sleeker
-        self.resize(800, 250)
+        # The main vertical layout
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(2)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
+        # --- TOP SECTION: DAW SPLIT VIEW ---
+        daw_layout = QHBoxLayout()
+        daw_layout.setContentsMargins(0, 0, 0, 0)
+        daw_layout.setSpacing(0)
 
+        # Left Side: Track Headers
+        self.headers = TrackHeaderPanel(project)
+        daw_layout.addWidget(self.headers)
+
+        # Right Side: Timeline
         self.timeline = TimelineWidget(project)
-        layout.addWidget(self.timeline, stretch=2)
+        daw_layout.addWidget(self.timeline)
 
+        # Add the horizontal split to the main vertical layout
+        main_layout.addLayout(daw_layout, stretch=2)
+
+        # --- BOTTOM SECTION: VISUALIZER ---
         self.visualizer = VisualizerWidget(mapper)
-        layout.addWidget(self.visualizer, stretch=1)
+        main_layout.addWidget(self.visualizer, stretch=1)
 
-        # Connect our safe signal to the UI update function
         self.frame_received.connect(self.process_frame_ui)
 
         self.player = PlaybackController(compositor, target_fps=60)
-
-        # The background thread EMITS the signal, instead of touching the UI directly
         self.player.on_frame_ready = lambda t, p: self.frame_received.emit(t, p)
-
         self.player.play()
 
     def process_frame_ui(self, current_t, packet):
-        # Because this is triggered by a Signal, it safely runs on the main UI thread
         self.visualizer.update_frame(packet)
         self.timeline.update_playhead(current_t)
 
-        # Loop the playhead
         if current_t > 6.0:
             self.player.seek(0.0)
 
