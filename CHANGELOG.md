@@ -1,5 +1,16 @@
 # Changelog
 
+## [2026-04-24] - Clip resize handles, ruler seek, properties panel, audio loader, file menu
+
+### Added
+- `widgets/properties.py` — `PropertiesPanel`: checkbox + spinbox per `ParameterSet` field; unchecked = None (inherit from track), spinbox disabled and shows resolved inherited value in gray; fields grouped Color / Spatial / Envelope Center / Envelope Edge / FX; collapsible bottom panel in `main.py`, shown on clip select, hidden on clear
+- `widgets/transport.py` — "Open Audio…" button opens `QFileDialog`; loaded filename shown in green; failure shown in red; pauses/resumes playback around load; emits `audio_loaded` signal
+- `main.py` — File menu with New Project, Open Project…, Save, Save As…, Open Audio… (Cmd+N/O/S/Shift+S shortcuts); `_reload_project()` hot-swaps compositor/output/controller without recreating the window; project loaded from `.titanproj` via `Project.load_from_file()`
+
+### Changed
+- `widgets/timeline.py` — `ClipItem` left/right 8 px edge handles: left handle adjusts `clip.start` + `clip.duration` together; right handle stretches duration; resize cursor on hover; `ItemIsMovable` flag disabled during resize to prevent position-change conflicts; resize handle hints painted as subtle bright strips; `TimeRulerItem` now responds to mouse press and calls `on_seek` callback; `TimelineWidget` exposes `seek_requested = Signal(float)` and `clip_selected = Signal(object)`; `main.py` wires both
+- `main.py` — properties panel wired: `clip_selected` signal looks up owning subtrack+track so `PropertiesPanel.show_clip()` receives full cascade context for resolved-value hints; panel collapses automatically on new project load
+
 ## [2026-04-24] - Core pipeline vectorization, DMX output, audio clock, transport UI, main entry point
 
 ### Added

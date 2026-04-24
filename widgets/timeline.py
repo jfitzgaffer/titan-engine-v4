@@ -1,17 +1,21 @@
 from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsRectItem, QGraphicsItem
-from PySide6.QtCore import Qt, QRectF, QPointF
-from PySide6.QtGui import QColor, QBrush, QPen, QPainter, QFont
+from PySide6.QtCore import Qt, QRectF, QPointF, Signal
+from PySide6.QtGui import QColor, QBrush, QPen, QPainter, QFont, QCursor
 
 from widgets.constants import TRACK_HEIGHT, RULER_HEIGHT, PIXELS_PER_SECOND
 
+HANDLE_WIDTH = 8   # px from clip edge that activates resize cursor
+
 
 class TimeRulerItem(QGraphicsItem):
-    """Time ruler painted at the top of the timeline scene."""
+    """Time ruler at the top of the scene. Click → seek."""
 
-    def __init__(self, width: float):
+    def __init__(self, width: float, on_seek=None):
         super().__init__()
         self._width = width
+        self._on_seek = on_seek   # callable(seconds: float) | None
         self.setZValue(5)
+        self.setAcceptedMouseButtons(Qt.LeftButton)
 
     def boundingRect(self) -> QRectF:
         return QRectF(0, 0, self._width, RULER_HEIGHT)
@@ -31,61 +35,162 @@ class TimeRulerItem(QGraphicsItem):
                 if mx < self._width:
                     painter.drawLine(int(mx), RULER_HEIGHT * 3 // 4, int(mx), RULER_HEIGHT)
 
+    def mousePressEvent(self, event):
+        if self._on_seek:
+            t = max(0.0, event.pos().x() / PIXELS_PER_SECOND)
+            self._on_seek(t)
+        event.accept()
+
 
 class ClipItem(QGraphicsRectItem):
-    """A clip block in the timeline. Draggable horizontally, Y-axis locked."""
+    """
+    A clip block. Left/right edges are resize handles (8 px).
+    The middle area drags the clip horizontally.
+    Y axis is locked to its track lane at all times.
+    """
 
-    # Track accent colours (cycle by track index)
     COLORS = [
-        QColor(140, 100, 200, 200),   # purple
-        QColor(80, 160, 220, 200),    # blue
-        QColor(80, 200, 130, 200),    # green
-        QColor(220, 160, 60, 200),    # amber
-        QColor(220, 80, 80, 200),     # red
+        QColor(140, 100, 200, 200),
+        QColor(80, 160, 220, 200),
+        QColor(80, 200, 130, 200),
+        QColor(220, 160, 60, 200),
+        QColor(220, 80, 80, 200),
     ]
 
-    def __init__(self, clip_model, y_offset: float, color_index: int = 0):
+    def __init__(self, clip_model, y_offset: float, color_index: int = 0, on_selected=None):
         super().__init__()
         self.clip = clip_model
-        self._locked_y = y_offset + 5   # Y is fixed; only X moves during drag
+        self._locked_y = y_offset + 5
+        self._on_selected = on_selected    # callable(clip) | None
 
-        x = self.clip.start * PIXELS_PER_SECOND
-        w = self.clip.duration * PIXELS_PER_SECOND
+        self._resize_edge: str | None = None
+        self._drag_origin_x: float = 0.0
+        self._drag_origin_start: float = 0.0
+        self._drag_origin_dur: float = 0.0
 
-        self.setRect(0, 0, w, TRACK_HEIGHT - 10)
-        self.setPos(x, self._locked_y)
+        self._update_rect()
+        self.setPos(self.clip.start * PIXELS_PER_SECOND, self._locked_y)
 
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
+        self.setAcceptHoverEvents(True)
 
         color = self.COLORS[color_index % len(self.COLORS)]
         self.setBrush(QBrush(color))
         self.setPen(QPen(QColor(220, 220, 220), 1))
 
+    def _update_rect(self):
+        w = max(0.1, self.clip.duration) * PIXELS_PER_SECOND
+        self.setRect(0, 0, w, TRACK_HEIGHT - 10)
+
+    # ------------------------------------------------------------------
+    # Drag (horizontal move)
+    # ------------------------------------------------------------------
+
     def itemChange(self, change, value):
-        if change == QGraphicsItem.ItemPositionChange:
-            # Clamp to non-negative time, lock Y axis
+        if change == QGraphicsItem.ItemPositionChange and self._resize_edge is None:
             return QPointF(max(0.0, value.x()), self._locked_y)
-
-        if change == QGraphicsItem.ItemPositionHasChanged:
+        if change == QGraphicsItem.ItemPositionHasChanged and self._resize_edge is None:
             self.clip.start = self.pos().x() / PIXELS_PER_SECOND
-
         return super().itemChange(change, value)
+
+    # ------------------------------------------------------------------
+    # Resize handles
+    # ------------------------------------------------------------------
+
+    def _edge_at(self, local_x: float) -> str | None:
+        w = self.rect().width()
+        if local_x <= HANDLE_WIDTH:
+            return "left"
+        if local_x >= w - HANDLE_WIDTH:
+            return "right"
+        return None
+
+    def hoverMoveEvent(self, event):
+        edge = self._edge_at(event.pos().x())
+        self.setCursor(Qt.SizeHorCursor if edge else Qt.SizeAllCursor)
+        super().hoverMoveEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        self.unsetCursor()
+        super().hoverLeaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            edge = self._edge_at(event.pos().x())
+            if edge:
+                self._resize_edge = edge
+                self._drag_origin_x = event.scenePos().x()
+                self._drag_origin_start = self.clip.start
+                self._drag_origin_dur = self.clip.duration
+                self.setFlag(QGraphicsItem.ItemIsMovable, False)
+                event.accept()
+                return
+            if self._on_selected:
+                self._on_selected(self.clip)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._resize_edge:
+            dx_sec = (event.scenePos().x() - self._drag_origin_x) / PIXELS_PER_SECOND
+
+            if self._resize_edge == "right":
+                self.clip.duration = max(0.1, self._drag_origin_dur + dx_sec)
+
+            elif self._resize_edge == "left":
+                new_end = self._drag_origin_start + self._drag_origin_dur
+                new_start = min(new_end - 0.1, max(0.0, self._drag_origin_start + dx_sec))
+                self.clip.start = new_start
+                self.clip.duration = new_end - new_start
+                self.setPos(new_start * PIXELS_PER_SECOND, self._locked_y)
+
+            self._update_rect()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._resize_edge:
+            self._resize_edge = None
+            self.setFlag(QGraphicsItem.ItemIsMovable, True)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    # ------------------------------------------------------------------
+    # Painting
+    # ------------------------------------------------------------------
 
     def paint(self, painter, option, widget):
         super().paint(painter, option, widget)
-        # Draw clip label (duration in seconds)
-        painter.setPen(QPen(QColor(255, 255, 255, 180), 1))
+
+        r = self.rect()
+
+        # Resize handle hints (subtle brighter strips on edges)
+        handle_color = QColor(255, 255, 255, 40)
+        painter.fillRect(QRectF(0, 0, HANDLE_WIDTH, r.height()), handle_color)
+        painter.fillRect(QRectF(r.width() - HANDLE_WIDTH, 0, HANDLE_WIDTH, r.height()), handle_color)
+
+        # Duration label
+        painter.setPen(QPen(QColor(255, 255, 255, 180)))
         painter.setFont(QFont("Arial", 8))
-        label = f"{self.clip.duration:.1f}s"
-        painter.drawText(self.rect().adjusted(4, 2, -4, -2), Qt.AlignLeft | Qt.AlignTop, label)
+        painter.drawText(r.adjusted(HANDLE_WIDTH + 2, 2, -HANDLE_WIDTH - 2, -2),
+                         Qt.AlignLeft | Qt.AlignTop,
+                         f"{self.clip.duration:.2f}s")
 
 
 class TimelineWidget(QGraphicsView):
-    """Main DAW timeline view. Horizontal Cmd/Ctrl+scroll zooms time axis."""
+    """
+    DAW timeline. Signals:
+      seek_requested(float)  — ruler click; connect to controller.seek()
+      clip_selected(object)  — clip clicked; connect to PropertiesPanel.show_clip()
+    """
 
-    SCENE_WIDTH = 5000   # virtual canvas width in scene pixels
+    seek_requested = Signal(float)
+    clip_selected  = Signal(object)   # carries the Clip dataclass
+
+    SCENE_WIDTH = 5000
 
     def __init__(self, project):
         super().__init__()
@@ -93,7 +198,6 @@ class TimelineWidget(QGraphicsView):
 
         self.scene = QGraphicsScene(self)
         self.setScene(self.scene)
-
         self.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.setRenderHint(QPainter.Antialiasing)
         self.setBackgroundBrush(QBrush(QColor(25, 25, 25)))
@@ -106,7 +210,10 @@ class TimelineWidget(QGraphicsView):
     def _populate_scene(self):
         self.scene.clear()
 
-        ruler = TimeRulerItem(self.SCENE_WIDTH)
+        ruler = TimeRulerItem(
+            self.SCENE_WIDTH,
+            on_seek=lambda t: self.seek_requested.emit(t),
+        )
         self.scene.addItem(ruler)
 
         y = RULER_HEIGHT
@@ -118,7 +225,11 @@ class TimelineWidget(QGraphicsView):
 
             for subtrack in track.sub_tracks:
                 for clip in subtrack.clips:
-                    self.scene.addItem(ClipItem(clip, y, track_idx))
+                    item = ClipItem(
+                        clip, y, track_idx,
+                        on_selected=lambda c: self.clip_selected.emit(c),
+                    )
+                    self.scene.addItem(item)
 
             y += TRACK_HEIGHT
 
@@ -132,7 +243,6 @@ class TimelineWidget(QGraphicsView):
         self.playhead_line.setZValue(10)
 
     def refresh(self):
-        """Rebuild the scene after the project structure changes."""
         self._populate_scene()
 
     def update_playhead(self, time_seconds: float):

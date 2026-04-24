@@ -30,14 +30,17 @@ Build order follows the risk-first sequence from PLAN.md: data model → rendere
 - [x] **`main.py`** — proper app entry point: builds demo project, wires pipeline, opens `MainWindow` with transport + DAW + visualizer
 - [x] **`widgets/timeline.py` — Y-axis lock bug** — `ClipItem` now locks Y to its track lane; dragging can no longer pull clips off their track
 - [x] **`widgets/timeline.py` — zoom & scroll** — horizontal zoom (Cmd/Meta + scroll); horizontal scroll bar always visible
-- [ ] **`widgets/timeline.py` — clip resize handles** — left/right drag handles to change `clip.start` / `clip.duration`
-- [ ] **`widgets/timeline.py` — ruler click-to-seek** — click on ruler calls `PlaybackController.seek()`
+- [x] **`widgets/timeline.py` — clip resize handles** — left/right 8 px edge handles; left handle moves `clip.start` and adjusts `clip.duration`; right handle stretches `clip.duration`; Y-lock preserved during resize; resize cursor on hover
+- [x] **`widgets/timeline.py` — ruler click-to-seek** — `TimeRulerItem` emits `seek_requested` signal; `TimelineWidget` forwards it; `main.py` wires to `controller.seek()`
+- [x] **`widgets/timeline.py` — `clip_selected` signal** — clicking a clip emits `clip_selected(clip)`; wired to `PropertiesPanel.show_clip()` in `main.py`
 - [ ] **`widgets/timeline.py` — multi-track vertical scroll** — scroll area for > 6 tracks; track lanes expand/collapse
 - [ ] **`widgets/timeline.py` — waveform underlay** — compute spectrogram with `librosa` at file-load time; render as `QImage` behind clips
 
 ## Phase 4: GUI — Properties & Editing
 
-- [ ] **`widgets/properties.py` — PropertiesPanel** — context-sensitive form for selected Track/SubTrack/Clip/VirtualPixel; each `ParameterSet` field has a "Set / Inherit" toggle; grayed-out field shows inherited effective value
+- [x] **`widgets/properties.py` — PropertiesPanel** — checkbox (own) + spinbox per `ParameterSet` field; unchecked = None (inherit), spinbox disabled and shows resolved inherited value; grouped Color / Spatial / Envelope Center / Envelope Edge / FX; collapsible bottom panel in `main.py`
+- [x] **`widgets/transport.py` — Open Audio button** — `QFileDialog` picker; filename shown in transport bar; calls `controller.load_audio()`; pauses and resumes playback around load; failure shown in red
+- [x] **`main.py` — File menu** — New Project, Open Project, Save, Save As, Open Audio; Cmd+N/O/S/Shift+S shortcuts; project open/save via `.titanproj`; `_reload_project()` hot-swaps pipeline without recreating window
 - [ ] **`widgets/visualizer.py` — pixel editor mode** — when a Clip is selected, clicking in the Visualizer adds/moves a `VirtualPixel`; mirrors piano-roll spatial metaphor
 
 ## Phase 5: Import & Content
