@@ -4,21 +4,8 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="28f6f48b-396d-4f7e-9c64-cbd59e9e6aec" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/.idea/Titan Engine V4.iml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/profiles_settings.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/modules.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/compositor.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/models/__init__.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/models/project.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/playback.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/spatial.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/test_arch.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/widgets/__init__.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/widgets/timeline.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/widgets/visualizer.py" afterDir="false" />
+    <list default="true" id="28f6f48b-396d-4f7e-9c64-cbd59e9e6aec" name="Changes" comment="Initial Commit">
+      <change beforePath="$PROJECT_DIR$/widgets/timeline.py" beforeDir="false" afterPath="$PROJECT_DIR$/widgets/timeline.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -76,14 +63,27 @@
       <option name="presentableId" value="Default" />
       <updated>1777068487882</updated>
     </task>
+    <task id="LOCAL-00001" summary="Initial Commit">
+      <option name="closed" value="true" />
+      <created>1777071410168</created>
+      <option name="number" value="00001" />
+      <option name="presentableId" value="LOCAL-00001" />
+      <option name="project" value="LOCAL" />
+      <updated>1777071410168</updated>
+    </task>
+    <option name="localTasksCounter" value="2" />
     <servers />
+  </component>
+  <component name="VcsManagerConfiguration">
+    <MESSAGE value="Initial Commit" />
+    <option name="LAST_COMMIT_MESSAGE" value="Initial Commit" />
   </component>
   <component name="XDebuggerManager">
     <breakpoint-manager>
       <breakpoints>
         <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
           <url>file://$PROJECT_DIR$/widgets/timeline.py</url>
-          <line>105</line>
+          <line>136</line>
           <option name="timeStamp" value="3" />
         </line-breakpoint>
       </breakpoints>

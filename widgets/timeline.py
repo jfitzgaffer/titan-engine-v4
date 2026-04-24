@@ -1,10 +1,46 @@
 from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsRectItem, QGraphicsItem
 from PySide6.QtCore import Qt, QRectF, QPointF
-from PySide6.QtGui import QColor, QBrush, QPen, QPainter
+from PySide6.QtGui import QColor, QBrush, QPen, QPainter, QFont
 
 # We need a scale: How many pixels represent 1 second of time?
 PIXELS_PER_SECOND = 100
 TRACK_HEIGHT = 60
+
+
+class TimeRulerItem(QGraphicsItem):
+    """The ruler bar at the top of the timeline."""
+
+    def __init__(self, width):
+        super().__init__()
+        self._width = width
+        # Set Z-value so it sits on top of the tracks, but below the red playhead
+        self.setZValue(5)
+
+    def boundingRect(self):
+        return QRectF(0, 0, self._width, 30)
+
+    def paint(self, painter, option, widget):
+        # Draw the ruler background
+        painter.fillRect(self.boundingRect(), QColor(35, 35, 35))
+        painter.setPen(QPen(QColor(150, 150, 150), 1))
+        painter.setFont(QFont("Arial", 9))
+
+        # Calculate how many seconds fit in our total width
+        total_seconds = int(self._width / PIXELS_PER_SECOND)
+
+        # Draw the tick marks and second labels
+        for s in range(total_seconds + 1):
+            x = s * PIXELS_PER_SECOND
+
+            # Major tick mark (every 1 second)
+            painter.drawLine(x, 15, x, 30)
+            painter.drawText(QRectF(x + 5, 0, 50, 15), Qt.AlignLeft, f"{s}s")
+
+            # Minor tick marks (every 0.25 seconds)
+            for minor in range(1, 4):
+                minor_x = x + (minor * PIXELS_PER_SECOND / 4)
+                if minor_x < self._width:
+                    painter.drawLine(minor_x, 22, minor_x, 30)
 
 
 class ClipItem(QGraphicsRectItem):
@@ -44,16 +80,6 @@ class ClipItem(QGraphicsRectItem):
         return super().itemChange(change, value)
 
 
-from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsRectItem, QGraphicsItem
-from PySide6.QtCore import Qt, QRectF, QPointF
-from PySide6.QtGui import QColor, QBrush, QPen, QPainter
-
-PIXELS_PER_SECOND = 100
-TRACK_HEIGHT = 60
-
-
-# ... (Keep your ClipItem class exactly as it is up here) ...
-
 class TimelineWidget(QGraphicsView):
     """The main view window for the DAW timeline."""
 
@@ -76,7 +102,12 @@ class TimelineWidget(QGraphicsView):
         self._populate_scene()
 
     def _populate_scene(self):
-        y_offset = 0
+        # ADD THE RULER:
+        ruler = TimeRulerItem(3000)
+        self.scene.addItem(ruler)
+
+        # Start drawing tracks BELOW the 30-pixel ruler
+        y_offset = 30
 
         for track in self.project.tracks:
             # Draw the dark background lane for the track
@@ -97,7 +128,7 @@ class TimelineWidget(QGraphicsView):
         # (We keep 3000 width so you can scroll horizontally through time)
         self.scene.setSceneRect(0, 0, 3000, max(y_offset, 100))
 
-        # Add the bright red playhead line
+        # Update playhead line to start at y=0 and go all the way down
         self.playhead_line = self.scene.addLine(0, 0, 0, y_offset, QPen(QColor(255, 50, 50), 2))
         self.playhead_line.setZValue(10)  # Keeps it drawn on top of the clips
 
