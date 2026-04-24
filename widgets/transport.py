@@ -38,7 +38,7 @@ class TransportBar(QWidget):
 
         self.time_label = QLabel("0:00.000")
         self.time_label.setStyleSheet(
-            "color: #00ff66; font-family: monospace; font-size: 13px; "
+            "color: #00ff66; font-family: 'Menlo', 'Courier New'; font-size: 13px; "
             "min-width: 80px; border: none;"
         )
         self.time_label.setAlignment(Qt.AlignCenter)
