@@ -8,7 +8,6 @@ from models.project import Clip, SubTrack, Track, VirtualPixel
 from widgets.constants import TRACK_HEIGHT, RULER_HEIGHT, AUDIO_TRACK_HEIGHT, PIXELS_PER_SECOND
 
 HANDLE_WIDTH = 8
-
 _LANES_Y = RULER_HEIGHT + AUDIO_TRACK_HEIGHT
 
 _MENU_SS = (
@@ -17,10 +16,19 @@ _MENU_SS = (
     "QMenu::separator { height: 1px; background: #444; margin: 2px 0; }"
 )
 
+# ── BPM grid subdivision definitions ────────────────────────────────
+# (beats_per_line, color_rgba, line_width_px)
+# Drawn smallest-first so higher-priority lines paint over.
+_GRID_SUBS = [
+    (0.25, QColor(255, 200, 0,  8), 0.5),   # 16th notes
+    (0.5,  QColor(255, 200, 0, 16), 0.5),   # 8th notes
+    (1.0,  QColor(255, 200, 0, 40), 1.0),   # quarter notes (beats)
+    (4.0,  QColor(255, 200, 0, 85), 1.5),   # bars (4/4)
+]
+_MIN_LINE_PX = 4   # don't draw subdivisions finer than this many px apart
+
 
 class TimeRulerItem(QGraphicsItem):
-    """Painted time ruler — mouse events handled at view level."""
-
     def __init__(self, width: float):
         super().__init__()
         self._width = width
@@ -46,10 +54,7 @@ class TimeRulerItem(QGraphicsItem):
 
 
 class AudioTrackItem(QGraphicsRectItem):
-    """
-    Audio reference row. Supports four view modes:
-      spectrogram | waveform | both | none
-    """
+    """Audio reference row — four view modes: spectrogram | waveform | both | none."""
 
     def __init__(self, width: float):
         super().__init__(0, 0, width, AUDIO_TRACK_HEIGHT)
@@ -62,23 +67,18 @@ class AudioTrackItem(QGraphicsRectItem):
         self.setBrush(QBrush(QColor(15, 15, 30)))
         self.setPen(QPen(QColor(40, 40, 60), 1))
 
-    def set_spectrogram_image(self, qimage: QImage):
-        self._spec_image = qimage.scaled(
-            int(self.rect().width()), AUDIO_TRACK_HEIGHT,
-            Qt.IgnoreAspectRatio, Qt.SmoothTransformation,
-        )
+    def set_spectrogram_image(self, img: QImage):
+        self._spec_image = img.scaled(int(self.rect().width()), AUDIO_TRACK_HEIGHT,
+                                      Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
         self.update()
 
-    def set_waveform_image(self, qimage: QImage):
-        self._wave_image = qimage.scaled(
-            int(self.rect().width()), AUDIO_TRACK_HEIGHT,
-            Qt.IgnoreAspectRatio, Qt.SmoothTransformation,
-        )
+    def set_waveform_image(self, img: QImage):
+        self._wave_image = img.scaled(int(self.rect().width()), AUDIO_TRACK_HEIGHT,
+                                      Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
         self.update()
 
-    # backward-compat alias
-    def set_image(self, qimage: QImage):
-        self.set_spectrogram_image(qimage)
+    def set_image(self, img: QImage):   # backward-compat
+        self.set_spectrogram_image(img)
 
     def set_view_mode(self, mode: str):
         self._view_mode = mode
@@ -86,27 +86,20 @@ class AudioTrackItem(QGraphicsRectItem):
 
     def paint(self, painter, option, widget):
         super().paint(painter, option, widget)
-        r = self.rect()
-        mode = self._view_mode
-
+        r, mode = self.rect(), self._view_mode
         if mode == "spectrogram":
-            if self._spec_image:
-                painter.drawImage(r, self._spec_image)
-            else:
-                self._placeholder(painter, r)
+            if self._spec_image: painter.drawImage(r, self._spec_image)
+            else: self._placeholder(painter, r)
         elif mode == "waveform":
-            if self._wave_image:
-                painter.drawImage(r, self._wave_image)
-            else:
-                self._placeholder(painter, r)
+            if self._wave_image: painter.drawImage(r, self._wave_image)
+            else: self._placeholder(painter, r)
         elif mode == "both":
-            if self._spec_image:
-                painter.drawImage(r, self._spec_image)
+            if self._spec_image: painter.drawImage(r, self._spec_image)
             if self._wave_image:
                 painter.setOpacity(0.65)
                 painter.drawImage(r, self._wave_image)
                 painter.setOpacity(1.0)
-        # mode == "none": show only the dark background
+        # "none": dark background only
 
     def _placeholder(self, painter, r):
         painter.setPen(QPen(QColor(70, 70, 90)))
@@ -116,9 +109,9 @@ class AudioTrackItem(QGraphicsRectItem):
 
 class ClipItem(QGraphicsRectItem):
     """
-    Clip block. Left/right 8 px edges resize; middle drags.
-    Y axis locked to lane. Selected state shows a thick gold border.
-    Right-click is handled by TimelineWidget.contextMenuEvent.
+    Clip block.  Left/right 8 px edges resize; middle drags (select mode).
+    In blade mode, clicks are handled at view level — this item ignores them.
+    Selected state draws a thick gold border.
     """
 
     COLORS = [
@@ -135,28 +128,22 @@ class ClipItem(QGraphicsRectItem):
         self.clip = clip_model
         self._locked_y = y_offset + 5
         self._on_selected = on_selected
-
         self._resize_edge: str | None = None
-        self._drag_origin_x: float = 0.0
-        self._drag_origin_start: float = 0.0
-        self._drag_origin_dur: float = 0.0
-
+        self._drag_origin_x = self._drag_origin_start = self._drag_origin_dur = 0.0
         self._color = self.COLORS[color_index % len(self.COLORS)]
         self._update_rect()
         self.setPos(self.clip.start * PIXELS_PER_SECOND, self._locked_y)
-
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
         self.setAcceptHoverEvents(True)
-
         self.setBrush(QBrush(self._color))
         self.setPen(QPen(QColor(220, 220, 220), 1))
 
     def _update_rect(self):
         self.setRect(0, 0, max(0.1, self.clip.duration) * PIXELS_PER_SECOND, TRACK_HEIGHT - 10)
 
-    # ---- drag -------------------------------------------------------
+    # ── drag / resize ────────────────────────────────────────────────
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.ItemPositionChange and self._resize_edge is None:
@@ -165,14 +152,10 @@ class ClipItem(QGraphicsRectItem):
             self.clip.start = self.pos().x() / PIXELS_PER_SECOND
         return super().itemChange(change, value)
 
-    # ---- resize handles ---------------------------------------------
-
     def _edge_at(self, local_x: float) -> str | None:
         w = self.rect().width()
-        if local_x <= HANDLE_WIDTH:
-            return "left"
-        if local_x >= w - HANDLE_WIDTH:
-            return "right"
+        if local_x <= HANDLE_WIDTH: return "left"
+        if local_x >= w - HANDLE_WIDTH: return "right"
         return None
 
     def hoverMoveEvent(self, event):
@@ -193,22 +176,20 @@ class ClipItem(QGraphicsRectItem):
                 self._drag_origin_dur   = self.clip.duration
                 self.setFlag(QGraphicsItem.ItemIsMovable, False)
                 self.setSelected(True)
-                if self._on_selected:
-                    self._on_selected(self.clip)
+                if self._on_selected: self._on_selected(self.clip)
                 event.accept()
                 return
-            if self._on_selected:
-                self._on_selected(self.clip)
+            if self._on_selected: self._on_selected(self.clip)
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if self._resize_edge:
-            dx_sec = (event.scenePos().x() - self._drag_origin_x) / PIXELS_PER_SECOND
+            dx = (event.scenePos().x() - self._drag_origin_x) / PIXELS_PER_SECOND
             if self._resize_edge == "right":
-                self.clip.duration = max(0.1, self._drag_origin_dur + dx_sec)
+                self.clip.duration = max(0.1, self._drag_origin_dur + dx)
             else:
                 new_end   = self._drag_origin_start + self._drag_origin_dur
-                new_start = min(new_end - 0.1, max(0.0, self._drag_origin_start + dx_sec))
+                new_start = min(new_end - 0.1, max(0.0, self._drag_origin_start + dx))
                 self.clip.start    = new_start
                 self.clip.duration = new_end - new_start
                 self.setPos(new_start * PIXELS_PER_SECOND, self._locked_y)
@@ -225,48 +206,39 @@ class ClipItem(QGraphicsRectItem):
             return
         super().mouseReleaseEvent(event)
 
-    # ---- paint ------------------------------------------------------
+    # ── paint ────────────────────────────────────────────────────────
 
     def paint(self, painter, option, widget):
         r = self.rect()
-
-        # Base fill
         painter.fillRect(r, self._color)
-
-        # Handle strip highlights
         painter.fillRect(QRectF(0, 0, HANDLE_WIDTH, r.height()), QColor(255, 255, 255, 30))
-        painter.fillRect(QRectF(r.width() - HANDLE_WIDTH, 0, HANDLE_WIDTH, r.height()),
+        painter.fillRect(QRectF(r.width()-HANDLE_WIDTH, 0, HANDLE_WIDTH, r.height()),
                          QColor(255, 255, 255, 30))
-
-        # Duration label
         painter.setPen(QPen(QColor(255, 255, 255, 180)))
         painter.setFont(QFont("Arial", 8))
-        painter.drawText(r.adjusted(HANDLE_WIDTH + 2, 2, -HANDLE_WIDTH - 2, -2),
-                         Qt.AlignLeft | Qt.AlignTop,
-                         f"{self.clip.duration:.2f}s")
-
-        # Border: thick gold when selected, thin white otherwise
-        if self.isSelected():
-            painter.setPen(QPen(QColor(255, 215, 0), 3))
-        else:
-            painter.setPen(QPen(QColor(220, 220, 220), 1))
+        painter.drawText(r.adjusted(HANDLE_WIDTH+2, 2, -HANDLE_WIDTH-2, -2),
+                         Qt.AlignLeft | Qt.AlignTop, f"{self.clip.duration:.2f}s")
+        painter.setPen(QPen(QColor(255, 215, 0), 3) if self.isSelected()
+                       else QPen(QColor(220, 220, 220), 1))
         painter.setBrush(Qt.NoBrush)
         painter.drawRect(r.adjusted(1, 1, -1, -1))
 
 
 class TimelineWidget(QGraphicsView):
     """
-    DAW timeline.
+    DAW timeline — DaVinci Resolve-inspired controls.
 
     Signals:
-      seek_requested(float)   — ruler click / scrub
+      seek_requested(float)   — ruler click / scrub / keyboard navigation
       clip_selected(object)   — clip left-clicked
-      project_changed()       — clip or track added / deleted
+      project_changed()       — clip or track added / deleted / split
+      tool_changed(str)       — "select" | "blade"
     """
 
     seek_requested  = Signal(float)
     clip_selected   = Signal(object)
     project_changed = Signal()
+    tool_changed    = Signal(str)
 
     SCENE_WIDTH = 5000
 
@@ -276,8 +248,11 @@ class TimelineWidget(QGraphicsView):
         self._seeking = False
         self._audio_item: AudioTrackItem | None = None
         self._bpm: float = 0.0
+        self._tempo_map: list = []   # [(time_sec, bpm), …] from variable-tempo analysis
         self._show_bpm_grid: bool = False
         self._bpm_lines: list = []
+        self._tool: str = "select"       # "select" | "blade"
+        self._playhead_time: float = 0.0
 
         self.scene = QGraphicsScene(self)
         self.setScene(self.scene)
@@ -286,11 +261,13 @@ class TimelineWidget(QGraphicsView):
         self.setBackgroundBrush(QBrush(QColor(25, 25, 25)))
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.setDragMode(QGraphicsView.RubberBandDrag)   # empty-space drag = rubber band
+        self.setFocusPolicy(Qt.StrongFocus)              # keyboard events land here
 
         self.playhead_line = None
         self._populate_scene()
 
-    # ---- scene build ------------------------------------------------
+    # ── scene build ──────────────────────────────────────────────────
 
     def _populate_scene(self):
         self.scene.clear()
@@ -298,7 +275,6 @@ class TimelineWidget(QGraphicsView):
         self._bpm_lines.clear()
 
         self.scene.addItem(TimeRulerItem(self.SCENE_WIDTH))
-
         self._audio_item = AudioTrackItem(self.SCENE_WIDTH)
         self.scene.addItem(self._audio_item)
 
@@ -309,7 +285,6 @@ class TimelineWidget(QGraphicsView):
                                else QColor(35, 35, 35)))
             bg.setPen(QPen(QColor(20, 20, 20), 0))
             self.scene.addItem(bg)
-
             for subtrack in track.sub_tracks:
                 for clip in subtrack.clips:
                     self.scene.addItem(ClipItem(
@@ -318,19 +293,16 @@ class TimelineWidget(QGraphicsView):
                     ))
             y += TRACK_HEIGHT
 
-        total_height = max(y, _LANES_Y + TRACK_HEIGHT)
-        self.scene.setSceneRect(0, 0, self.SCENE_WIDTH, total_height)
-
+        total_h = max(y, _LANES_Y + TRACK_HEIGHT)
+        self.scene.setSceneRect(0, 0, self.SCENE_WIDTH, total_h)
         self.playhead_line = self.scene.addLine(
-            0, 0, 0, total_height, QPen(QColor(255, 50, 50), 2)
-        )
+            0, 0, 0, total_h, QPen(QColor(255, 50, 50), 2))
         self.playhead_line.setZValue(10)
 
-        if self._show_bpm_grid and self._bpm > 0:
+        if self._show_bpm_grid:
             self._rebuild_bpm_grid()
 
     def refresh(self):
-        """Rebuild scene, preserving audio images and BPM state."""
         spec  = self._audio_item._spec_image if self._audio_item else None
         wave  = self._audio_item._wave_image if self._audio_item else None
         vmode = self._audio_item._view_mode  if self._audio_item else "spectrogram"
@@ -343,34 +315,53 @@ class TimelineWidget(QGraphicsView):
         if self.playhead_line:
             self.playhead_line.setPos(ph, 0)
 
-    # ---- audio image passthrough -----------------------------------
+    # ── audio image passthrough ───────────────────────────────────────
 
-    def set_audio_image(self, qimage: QImage):
-        if self._audio_item:
-            self._audio_item.set_spectrogram_image(qimage)
+    def set_audio_image(self, img):
+        if self._audio_item: self._audio_item.set_spectrogram_image(img)
 
-    def set_spectrogram_image(self, qimage: QImage):
-        if self._audio_item:
-            self._audio_item.set_spectrogram_image(qimage)
+    def set_spectrogram_image(self, img):
+        if self._audio_item: self._audio_item.set_spectrogram_image(img)
 
-    def set_waveform_image(self, qimage: QImage):
-        if self._audio_item:
-            self._audio_item.set_waveform_image(qimage)
+    def set_waveform_image(self, img):
+        if self._audio_item: self._audio_item.set_waveform_image(img)
 
     def set_audio_view_mode(self, mode: str):
-        if self._audio_item:
-            self._audio_item.set_view_mode(mode)
+        if self._audio_item: self._audio_item.set_view_mode(mode)
 
-    # ---- playhead --------------------------------------------------
+    # ── playhead + autoscroll ─────────────────────────────────────────
 
     def update_playhead(self, time_seconds: float):
-        if self.playhead_line:
-            self.playhead_line.setPos(time_seconds * PIXELS_PER_SECOND, 0)
+        self._playhead_time = time_seconds
+        if not self.playhead_line:
+            return
+        x = time_seconds * PIXELS_PER_SECOND
+        self.playhead_line.setPos(x, 0)
 
-    # ---- BPM grid --------------------------------------------------
+        # Autoscroll: keep playhead in the middle 70 % of the viewport
+        vr  = self.viewport().rect()
+        vpx = self.mapFromScene(QPointF(x, 0)).x()
+        left_margin  = vr.width() * 0.15
+        right_margin = vr.width() * 0.80
+        if vpx < left_margin or vpx > right_margin:
+            # Scroll so playhead sits at 25 % from left
+            target = x - vr.width() * 0.25
+            self.horizontalScrollBar().setValue(int(max(0, target)))
+
+    # ── BPM / tempo map grid ──────────────────────────────────────────
 
     def set_bpm(self, bpm: float):
         self._bpm = bpm
+        if not self._tempo_map:
+            self._tempo_map = [(0.0, bpm)]
+        if self._show_bpm_grid:
+            self._rebuild_bpm_grid()
+
+    def set_tempo_map(self, tempo_map: list):
+        """Accept a [(time_sec, bpm), …] list from variable-tempo analysis."""
+        self._tempo_map = tempo_map
+        if tempo_map:
+            self._bpm = tempo_map[0][1]
         if self._show_bpm_grid:
             self._rebuild_bpm_grid()
 
@@ -378,30 +369,64 @@ class TimelineWidget(QGraphicsView):
         self._show_bpm_grid = visible
         for line in self._bpm_lines:
             line.setVisible(visible)
-        if visible and self._bpm > 0 and not self._bpm_lines:
+        if visible and not self._bpm_lines:
             self._rebuild_bpm_grid()
 
     def _rebuild_bpm_grid(self):
         for line in self._bpm_lines:
             self.scene.removeItem(line)
         self._bpm_lines.clear()
-        if not self._show_bpm_grid or self._bpm <= 0:
+        if not self._show_bpm_grid:
             return
-        beat_px = (60.0 / self._bpm) * PIXELS_PER_SECOND
-        scene_h = self.scene.sceneRect().height()
-        beat_num = 1
-        x = beat_px
-        while x < self.SCENE_WIDTH:
-            is_bar = (beat_num % 4 == 0)
-            pen = QPen(QColor(255, 200, 0, 80 if is_bar else 35),
-                       1.5 if is_bar else 1.0)
-            line = self.scene.addLine(x, 0, x, scene_h, pen)
-            line.setZValue(2)
-            self._bpm_lines.append(line)
-            x += beat_px
-            beat_num += 1
 
-    # ---- project mutations -----------------------------------------
+        tmap = self._tempo_map if self._tempo_map else ([(0.0, self._bpm)] if self._bpm > 0 else [])
+        if not tmap:
+            return
+
+        scene_h = self.scene.sceneRect().height()
+
+        # Build segment list: [(start_sec, end_sec, bpm), …]
+        segments = []
+        for i, (t_start, bpm) in enumerate(tmap):
+            t_end = tmap[i + 1][0] if i + 1 < len(tmap) else self.SCENE_WIDTH / PIXELS_PER_SECOND
+            segments.append((t_start, t_end, bpm))
+
+        for (seg_start, seg_end, bpm) in segments:
+            if bpm <= 0:
+                continue
+            beat_sec = 60.0 / bpm
+            beat_px  = beat_sec * PIXELS_PER_SECOND
+            x0 = seg_start * PIXELS_PER_SECOND
+            x1 = min(seg_end * PIXELS_PER_SECOND, self.SCENE_WIDTH)
+
+            for div_beats, color, lw in _GRID_SUBS:
+                div_px = beat_px * div_beats
+                if div_px < _MIN_LINE_PX:
+                    continue
+                # Start on the first subdivision boundary at or after x0
+                n = max(0, int((x0) / div_px))
+                x = n * div_px
+                if x < x0:
+                    x += div_px
+                while x <= x1:
+                    line = self.scene.addLine(x, 0, x, scene_h, QPen(color, lw))
+                    line.setZValue(2)
+                    self._bpm_lines.append(line)
+                    x += div_px
+
+    # ── tool mode ────────────────────────────────────────────────────
+
+    def set_tool(self, tool: str):
+        self._tool = tool
+        if tool == "blade":
+            self.setCursor(Qt.CrossCursor)
+            self.setDragMode(QGraphicsView.NoDrag)
+        else:
+            self.unsetCursor()
+            self.setDragMode(QGraphicsView.RubberBandDrag)
+        self.tool_changed.emit(tool)
+
+    # ── project mutations ─────────────────────────────────────────────
 
     def _track_idx_at_y(self, scene_y: float) -> int | None:
         if scene_y < _LANES_Y:
@@ -409,55 +434,152 @@ class TimelineWidget(QGraphicsView):
         idx = int((scene_y - _LANES_Y) / TRACK_HEIGHT)
         return idx if 0 <= idx < len(self.project.tracks) else None
 
+    def _all_edit_points(self) -> list:
+        pts = set()
+        for track in self.project.tracks:
+            for st in track.sub_tracks:
+                for clip in st.clips:
+                    pts.add(clip.start)
+                    pts.add(clip.start + clip.duration)
+        return sorted(pts)
+
     def _add_clip_at(self, track_idx: int, start: float):
         track = self.project.tracks[track_idx]
         if not track.sub_tracks:
             track.sub_tracks.append(SubTrack())
         track.sub_tracks[0].clips.append(
             Clip(start=max(0.0, start), duration=2.0,
-                 pixels=[VirtualPixel(x=0.5, width=0.5)])
-        )
+                 pixels=[VirtualPixel(x=0.5, width=0.5)]))
         self.refresh()
         self.project_changed.emit()
 
     def _add_track(self):
-        new_track = Track(name=f"Track {len(self.project.tracks) + 1}")
-        new_track.sub_tracks.append(SubTrack())
-        self.project.tracks.append(new_track)
+        t = Track(name=f"Track {len(self.project.tracks) + 1}")
+        t.sub_tracks.append(SubTrack())
+        self.project.tracks.append(t)
         self.refresh()
         self.project_changed.emit()
 
     def _delete_clip(self, clip):
         for track in self.project.tracks:
-            for subtrack in track.sub_tracks:
-                if clip in subtrack.clips:
-                    subtrack.clips.remove(clip)
+            for st in track.sub_tracks:
+                if clip in st.clips:
+                    st.clips.remove(clip)
                     self.refresh()
                     self.project_changed.emit()
                     return
+
+    def _delete_selected_clips(self):
+        clips = [i.clip for i in self.scene.selectedItems() if isinstance(i, ClipItem)]
+        if not clips:
+            return
+        for track in self.project.tracks:
+            for st in track.sub_tracks:
+                st.clips = [c for c in st.clips if c not in clips]
+        self.refresh()
+        self.project_changed.emit()
+
+    def _select_all(self):
+        for item in self.scene.items():
+            if isinstance(item, ClipItem):
+                item.setSelected(True)
 
     def _duplicate_clip(self, clip):
         for track in self.project.tracks:
-            for subtrack in track.sub_tracks:
-                if clip in subtrack.clips:
-                    new_clip = copy.deepcopy(clip)
-                    new_clip.start += new_clip.duration
-                    subtrack.clips.append(new_clip)
+            for st in track.sub_tracks:
+                if clip in st.clips:
+                    nc = copy.deepcopy(clip)
+                    nc.start += nc.duration
+                    st.clips.append(nc)
                     self.refresh()
                     self.project_changed.emit()
                     return
 
-    # ---- context menu (view level handles all cases) ---------------
+    def _split_clip_at(self, clip, split_time: float):
+        """Split a clip into two at split_time (absolute timeline seconds)."""
+        if split_time <= clip.start or split_time >= clip.start + clip.duration:
+            return
+        left  = copy.deepcopy(clip)
+        left.duration = split_time - clip.start
+        right = copy.deepcopy(clip)
+        right.start    = split_time
+        right.duration = (clip.start + clip.duration) - split_time
+        for track in self.project.tracks:
+            for st in track.sub_tracks:
+                if clip in st.clips:
+                    idx = st.clips.index(clip)
+                    st.clips[idx:idx+1] = [left, right]
+                    self.refresh()
+                    self.project_changed.emit()
+                    return
+
+    def _nudge_selected(self, delta_sec: float):
+        """Move all selected clips left or right by delta_sec."""
+        for item in self.scene.selectedItems():
+            if isinstance(item, ClipItem):
+                item.clip.start = max(0.0, item.clip.start + delta_sec)
+        self.refresh()
+        self.project_changed.emit()
+
+    # ── keyboard shortcuts ─────────────────────────────────────────────
+    # V = select tool   B = blade tool
+    # Delete/Backspace  = delete selected clips
+    # Ctrl+A            = select all
+    # Home / End        = jump to start / end
+    # ← / →            = previous / next edit point
+    # Shift+← / Shift+→ = nudge selected clips ±0.1 s
+    # + / =             = zoom in      − = zoom out      \ = reset zoom
+
+    def keyPressEvent(self, event):
+        key  = event.key()
+        mods = event.modifiers()
+        ctrl = mods & Qt.ControlModifier
+
+        if key == Qt.Key_V:
+            self.set_tool("select")
+        elif key == Qt.Key_B:
+            self.set_tool("blade")
+        elif key in (Qt.Key_Delete, Qt.Key_Backspace):
+            self._delete_selected_clips()
+        elif ctrl and key == Qt.Key_A:
+            self._select_all()
+        elif key == Qt.Key_Home:
+            self.seek_requested.emit(0.0)
+        elif key == Qt.Key_End:
+            pts = self._all_edit_points()
+            if pts: self.seek_requested.emit(pts[-1])
+        elif key == Qt.Key_Left:
+            if mods & Qt.ShiftModifier:
+                self._nudge_selected(-0.1)
+            else:
+                t = self._playhead_time
+                pts = [p for p in self._all_edit_points() if p < t - 0.01]
+                if pts: self.seek_requested.emit(pts[-1])
+        elif key == Qt.Key_Right:
+            if mods & Qt.ShiftModifier:
+                self._nudge_selected(0.1)
+            else:
+                t = self._playhead_time
+                pts = [p for p in self._all_edit_points() if p > t + 0.01]
+                if pts: self.seek_requested.emit(pts[0])
+        elif key in (Qt.Key_Plus, Qt.Key_Equal):
+            self.scale(1.25, 1.0)
+        elif key == Qt.Key_Minus:
+            self.scale(0.8, 1.0)
+        elif key == Qt.Key_Backslash:
+            self.resetTransform()
+        else:
+            super().keyPressEvent(event)
+
+    # ── context menu ──────────────────────────────────────────────────
 
     def contextMenuEvent(self, event):
         scene_pos = self.mapToScene(event.pos())
 
-        # Check for clip under cursor first
-        clip_item = None
-        for item in self.scene.items(scene_pos):
-            if isinstance(item, ClipItem):
-                clip_item = item
-                break
+        clip_item = next(
+            (i for i in self.scene.items(scene_pos) if isinstance(i, ClipItem)),
+            None,
+        )
 
         menu = QMenu()
         menu.setStyleSheet(_MENU_SS)
@@ -465,17 +587,24 @@ class TimelineWidget(QGraphicsView):
         if clip_item:
             del_act = menu.addAction("Delete Clip")
             dup_act = menu.addAction("Duplicate Clip")
+            spl_act = menu.addAction(f"Split at {self._playhead_time:.2f}s")
             act = menu.exec(QCursor.pos())
             if act == del_act:
                 self._delete_clip(clip_item.clip)
             elif act == dup_act:
                 self._duplicate_clip(clip_item.clip)
+            elif act == spl_act:
+                self._split_clip_at(clip_item.clip, self._playhead_time)
         else:
             track_idx = self._track_idx_at_y(scene_pos.y())
             t = max(0.0, scene_pos.x() / PIXELS_PER_SECOND)
             if track_idx is not None:
                 menu.addAction(f"Add Clip at {t:.2f}s")
             menu.addAction("Add Track")
+            sel_items = [i for i in self.scene.selectedItems() if isinstance(i, ClipItem)]
+            if sel_items:
+                menu.addSeparator()
+                menu.addAction("Delete Selected")
             act = menu.exec(QCursor.pos())
             if act is None:
                 return
@@ -484,18 +613,30 @@ class TimelineWidget(QGraphicsView):
                 self._add_clip_at(track_idx, t)
             elif text == "Add Track":
                 self._add_track()
+            elif text == "Delete Selected":
+                self._delete_selected_clips()
 
         event.accept()
 
-    # ---- ruler seek (view level) ------------------------------------
+    # ── ruler seek (view level) ───────────────────────────────────────
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             scene_y = self.mapToScene(event.pos()).y()
+            # Ruler seek
             if 0 <= scene_y <= RULER_HEIGHT:
                 self._seeking = True
                 t = max(0.0, self.mapToScene(event.pos()).x() / PIXELS_PER_SECOND)
                 self.seek_requested.emit(t)
+                event.accept()
+                return
+            # Blade tool: split clip under cursor
+            if self._tool == "blade":
+                t = max(0.0, self.mapToScene(event.pos()).x() / PIXELS_PER_SECOND)
+                for item in self.scene.items(self.mapToScene(event.pos())):
+                    if isinstance(item, ClipItem):
+                        self._split_clip_at(item.clip, t)
+                        break
                 event.accept()
                 return
         super().mousePressEvent(event)
@@ -515,7 +656,7 @@ class TimelineWidget(QGraphicsView):
             return
         super().mouseReleaseEvent(event)
 
-    # ---- zoom -------------------------------------------------------
+    # ── zoom ──────────────────────────────────────────────────────────
 
     def wheelEvent(self, event):
         if event.modifiers() in (Qt.ControlModifier, Qt.MetaModifier):

@@ -56,6 +56,7 @@ class AudioAnalysisWorker(QThread):
     spectrogram_ready = Signal(object)   # QImage
     waveform_ready    = Signal(object)   # QImage
     bpm_ready         = Signal(float)
+    tempo_map_ready   = Signal(object)   # list[(time_sec, bpm)]
 
     def __init__(self, audio_path: str, target_width: int = 2000, target_height: int = 80):
         super().__init__()
@@ -72,12 +73,14 @@ class AudioAnalysisWorker(QThread):
         try:
             data, sr = sf.read(self._path, dtype='float32', always_2d=True)
             mono = data.mean(axis=1)
-            spec_img = self._spectrogram(mono, sr)
-            wave_img = self._waveform(mono)
-            bpm      = self._detect_bpm(mono, sr)
-            if spec_img: self.spectrogram_ready.emit(spec_img)
-            if wave_img: self.waveform_ready.emit(wave_img)
-            if bpm > 0:  self.bpm_ready.emit(bpm)
+            spec_img   = self._spectrogram(mono, sr)
+            wave_img   = self._waveform(mono)
+            tempo_map  = self._build_tempo_map(mono, sr)
+            bpm        = tempo_map[0][1] if tempo_map else self._detect_bpm(mono, sr)
+            if spec_img:  self.spectrogram_ready.emit(spec_img)
+            if wave_img:  self.waveform_ready.emit(wave_img)
+            if tempo_map: self.tempo_map_ready.emit(tempo_map)
+            if bpm > 0:   self.bpm_ready.emit(bpm)
         except Exception as e:
             logger.warning(f"Audio analysis failed: {e}")
 
@@ -170,6 +173,40 @@ class AudioAnalysisWorker(QThread):
         peak = np.argmax(ac[min_p: max_p + 1]) + min_p
         return fps * 60.0 / peak if peak > 0 else 0.0
 
+    # ---- variable tempo map -----------------------------------------
+
+    def _build_tempo_map(self, mono, sr) -> list:
+        """
+        Slice audio into overlapping 4-second windows; detect BPM per window.
+        Merge consecutive windows within 2% of each other to find change points.
+        Returns [(time_sec, bpm), …] sorted by time, or [] if detection fails.
+        """
+        win_sec = 4.0
+        hop_sec = 2.0
+        win_n   = int(win_sec * sr)
+        hop_n   = int(hop_sec * sr)
+
+        raw = []
+        i = 0
+        t = 0.0
+        while i + win_n <= len(mono):
+            bpm = self._detect_bpm(mono[i: i + win_n], sr)
+            if bpm > 0:
+                raw.append((t + win_sec / 2.0, bpm))
+            i += hop_n
+            t += hop_sec
+
+        if not raw:
+            return []
+
+        # Merge windows: keep only where BPM changes by > 2 %
+        merged = [(0.0, raw[0][1])]
+        for time_sec, bpm in raw[1:]:
+            if abs(bpm - merged[-1][1]) / merged[-1][1] > 0.02:
+                merged.append((time_sec, bpm))
+
+        return merged
+
 
 # ------------------------------------------------------------------
 # Demo project
@@ -228,6 +265,7 @@ class MainWindow(QMainWindow):
 
         self._save_path: str | None = None
         self._analysis_worker: AudioAnalysisWorker | None = None
+        self._selected_clip = None
 
         # Pipeline
         self.compositor = CompositorEngine(project, mapper)
@@ -352,8 +390,17 @@ class MainWindow(QMainWindow):
         self.headers.audio_header.view_mode_changed.connect(self.timeline.set_audio_view_mode)
         self.headers.audio_header.bpm_grid_toggled.connect(self.timeline.set_bpm_grid_visible)
 
-        space = QShortcut(QKeySequence(Qt.Key_Space), self)
-        space.activated.connect(self.transport.toggle_play_pause)
+        # Global shortcuts (work regardless of which widget has focus)
+        for key, slot in [
+            (Qt.Key_Space, self.transport.toggle_play_pause),
+            (Qt.Key_J,     self.controller.pause),
+            (Qt.Key_K,     self.controller.stop),
+            (Qt.Key_L,     self.controller.play),
+            (Qt.Key_V,     lambda: self.timeline.set_tool("select")),
+            (Qt.Key_B,     lambda: self.timeline.set_tool("blade")),
+        ]:
+            s = QShortcut(QKeySequence(key), self)
+            s.activated.connect(slot)
 
     # ------------------------------------------------------------------
     # Slots
@@ -364,6 +411,7 @@ class MainWindow(QMainWindow):
         self.timeline.update_playhead(current_t)
 
     def _on_clip_selected(self, clip):
+        self._selected_clip = clip
         for track in self.project.tracks:
             for subtrack in track.sub_tracks:
                 if clip in subtrack.clips:
@@ -371,10 +419,19 @@ class MainWindow(QMainWindow):
                     return
         self.properties.show_clip(clip)
 
-    def _render_current_frame(self):
-        """Live preview: re-render at current playhead position and push to visualizer."""
+    def _render_current_frame(self, *_):
+        """
+        Re-render at the current playhead position and push to the visualizer.
+        If the playhead is outside the selected clip's range, preview at the
+        clip midpoint so parameter edits are always immediately visible.
+        """
+        t = self.controller.playhead_time
+        if self._selected_clip is not None:
+            c = self._selected_clip
+            if not (c.start <= t <= c.start + c.duration):
+                t = c.start + c.duration * 0.5
         try:
-            universes = self.compositor.render_frame(self.controller.playhead_time)
+            universes = self.compositor.render_frame(t)
             if universes:
                 self.visualizer.update_frame(next(iter(universes.values())))
         except Exception as e:
@@ -391,6 +448,7 @@ class MainWindow(QMainWindow):
         self._analysis_worker.spectrogram_ready.connect(self.timeline.set_spectrogram_image)
         self._analysis_worker.waveform_ready.connect(self.timeline.set_waveform_image)
         self._analysis_worker.bpm_ready.connect(self._on_bpm_detected)
+        self._analysis_worker.tempo_map_ready.connect(self.timeline.set_tempo_map)
         self._analysis_worker.start()
         logger.info(f"Audio analysis started for {Path(path).name}")
 
