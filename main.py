@@ -7,13 +7,14 @@ Pipeline: ProjectModel → SpatialMapper → CompositorEngine
 import sys
 import logging
 
+import numpy as np
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QVBoxLayout, QHBoxLayout, QSplitter,
-    QMenuBar, QFileDialog, QMessageBox,
+    QFileDialog, QMessageBox,
 )
-from PySide6.QtCore import Qt, Signal, QObject
-from PySide6.QtGui import QKeySequence, QAction
+from PySide6.QtCore import Qt, Signal, QObject, QThread
+from PySide6.QtGui import QKeySequence, QAction, QImage, QShortcut
 
 from models.project import (
     Project, Track, SubTrack, Clip,
@@ -40,11 +41,94 @@ logger = logging.getLogger(__name__)
 # Thread-safe bridge: render thread → Qt main thread
 # ------------------------------------------------------------------
 class FrameBridge(QObject):
-    frame_ready = Signal(float, object)   # (playhead_time, {universe: bytearray})
+    frame_ready = Signal(float, object)
 
 
 # ------------------------------------------------------------------
-# Demo project (used until a real .titanproj is loaded)
+# Audio spectrogram worker
+# ------------------------------------------------------------------
+class AudioAnalysisWorker(QThread):
+    """
+    Computes a colored spectrogram from an audio file in a background thread.
+    Emits result(QImage) when done. Uses only numpy — no librosa required.
+    """
+    result = Signal(object)   # QImage
+
+    def __init__(self, audio_path: str, target_width: int = 2000, target_height: int = 80):
+        super().__init__()
+        self._path = audio_path
+        self._w = target_width
+        self._h = target_height
+
+    def run(self):
+        try:
+            qimg = self._compute()
+            if qimg is not None:
+                self.result.emit(qimg)
+        except Exception as e:
+            logger.warning(f"Audio analysis failed: {e}")
+
+    def _compute(self) -> QImage | None:
+        try:
+            import soundfile as sf
+        except ImportError:
+            logger.warning("soundfile not installed — spectrogram unavailable")
+            return None
+
+        data, sr = sf.read(self._path, dtype='float32', always_2d=True)
+        mono = data.mean(axis=1)
+
+        n_fft  = 2048
+        n_freq = n_fft // 2 + 1
+        hop    = max(1, len(mono) // self._w)
+
+        # Build STFT column by column
+        window = np.hanning(n_fft).astype(np.float32)
+        n_frames = self._w
+        spec = np.zeros((n_freq, n_frames), dtype=np.float32)
+        for i in range(n_frames):
+            start = i * hop
+            chunk = mono[start: start + n_fft]
+            if len(chunk) < n_fft:
+                chunk = np.pad(chunk, (0, n_fft - len(chunk)))
+            spec[:, i] = np.abs(np.fft.rfft(chunk * window))
+
+        # Log amplitude, keep lower 60% of frequencies (musical range)
+        cutoff = int(n_freq * 0.60)
+        spec = np.log1p(spec[:cutoff, :])
+
+        # Resize vertically to target_height via linear interpolation
+        y_src = np.linspace(0, cutoff - 1, self._h).astype(int)
+        spec = spec[y_src, :]
+
+        # Flip so low frequencies are at the bottom
+        spec = np.flipud(spec)
+
+        # Normalize to [0, 1]
+        s_min, s_max = spec.min(), spec.max()
+        if s_max > s_min:
+            spec = (spec - s_min) / (s_max - s_min)
+        else:
+            spec = np.zeros_like(spec)
+
+        # Colorize: black→purple→blue→cyan→green→yellow→red
+        r = np.clip(spec * 3 - 1.5, 0, 1)
+        g = np.clip(spec * 3 - 0.5, 0, 1) * np.clip(2.5 - spec * 3, 0, 1)
+        b = np.clip(1.5 - spec * 3, 0, 1) + np.clip(spec * 3 - 2, 0, 1)
+
+        rgb = np.stack([
+            (r * 255).astype(np.uint8),
+            (g * 255).astype(np.uint8),
+            (b * 255).astype(np.uint8),
+        ], axis=2)
+
+        h, w = rgb.shape[:2]
+        img = QImage(rgb.tobytes(), w, h, w * 3, QImage.Format_RGB888)
+        return img.copy()   # detach from the numpy buffer
+
+
+# ------------------------------------------------------------------
+# Demo project
 # ------------------------------------------------------------------
 def build_demo_project() -> tuple:
     fixture = PhysicalFixture(
@@ -71,14 +155,17 @@ def build_demo_project() -> tuple:
         params=ParameterSet(dim=0.8, b=200.0),
         sub_tracks=[SubTrack(clips=[
             Clip(start=1.0, duration=1.5,
-                 params=ParameterSet(atk_c=0.1, rel_c=1.2, sus_c=0.8, atk_e=0.5, rel_e=0.3),
-                 pixels=[VirtualPixel(x=0.25, width=0.35), VirtualPixel(x=0.75, width=0.35)]),
+                 params=ParameterSet(atk_c=0.1, rel_c=1.2, sus_c=0.8,
+                                     atk_e=0.5, rel_e=0.3),
+                 pixels=[VirtualPixel(x=0.25, width=0.35),
+                         VirtualPixel(x=0.75, width=0.35)]),
             Clip(start=4.0, duration=1.0,
                  params=ParameterSet(atk_c=0.2, rel_c=0.5, sus_c=1.0),
                  pixels=[VirtualPixel(x=0.5, width=0.8)]),
         ])],
     )
-    project = Project(name="Demo Project", spatial_map=[segment], tracks=[track_a, track_b])
+    project = Project(name="Demo Project", spatial_map=[segment],
+                      tracks=[track_a, track_b])
     return project, mapper
 
 
@@ -92,8 +179,11 @@ class MainWindow(QMainWindow):
         self.mapper = mapper
 
         self.setWindowTitle(f"Titan Engine v4 — {project.name}")
-        self.resize(1280, 720)
+        self.resize(1400, 720)
         self.setStyleSheet("QMainWindow { background: #1a1a1a; } QWidget { color: white; }")
+
+        self._save_path: str | None = None
+        self._analysis_worker: AudioAnalysisWorker | None = None
 
         # Pipeline
         self.compositor = CompositorEngine(project, mapper)
@@ -104,7 +194,6 @@ class MainWindow(QMainWindow):
             target_fps=44,
         )
 
-        # Frame bridge (render thread → Qt thread)
         self._bridge = FrameBridge()
         self._bridge.frame_ready.connect(self._on_frame)
         self.controller.on_frame_ready = lambda t, u: self._bridge.frame_ready.emit(t, u)
@@ -113,49 +202,36 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._wire_signals()
 
-        logger.info("MainWindow ready — click ▶ to start playback")
+        logger.info("MainWindow ready — click ▶ or press Space to start playback")
 
     # ------------------------------------------------------------------
-    # Menu bar
+    # Menu
     # ------------------------------------------------------------------
     def _build_menu(self):
-        menubar = self.menuBar()
-        menubar.setStyleSheet(
+        mb = self.menuBar()
+        mb.setStyleSheet(
             "QMenuBar { background: #1a1a1a; color: white; }"
             "QMenuBar::item:selected { background: #333; }"
             "QMenu { background: #2a2a2a; color: white; border: 1px solid #444; }"
             "QMenu::item:selected { background: #3a3a3a; }"
         )
+        file_menu = mb.addMenu("File")
 
-        file_menu = menubar.addMenu("File")
+        def act(label, shortcut=None, slot=None):
+            a = QAction(label, self)
+            if shortcut:
+                a.setShortcut(QKeySequence(shortcut))
+            if slot:
+                a.triggered.connect(slot)
+            file_menu.addAction(a)
+            return a
 
-        act_new = QAction("New Project", self)
-        act_new.setShortcut(QKeySequence.New)
-        act_new.triggered.connect(self._action_new_project)
-        file_menu.addAction(act_new)
-
-        act_open = QAction("Open Project…", self)
-        act_open.setShortcut(QKeySequence.Open)
-        act_open.triggered.connect(self._action_open_project)
-        file_menu.addAction(act_open)
-
-        act_save = QAction("Save Project", self)
-        act_save.setShortcut(QKeySequence.Save)
-        act_save.triggered.connect(self._action_save_project)
-        file_menu.addAction(act_save)
-
-        act_save_as = QAction("Save Project As…", self)
-        act_save_as.setShortcut(QKeySequence.SaveAs)
-        act_save_as.triggered.connect(self._action_save_project_as)
-        file_menu.addAction(act_save_as)
-
+        act("New Project",    "Ctrl+N",       self._action_new)
+        act("Open Project…",  "Ctrl+O",       self._action_open)
+        act("Save Project",   "Ctrl+S",       self._action_save)
+        act("Save Project As…","Ctrl+Shift+S", self._action_save_as)
         file_menu.addSeparator()
-
-        act_open_audio = QAction("Open Audio…", self)
-        act_open_audio.triggered.connect(lambda: self.transport.btn_open_audio.click())
-        file_menu.addAction(act_open_audio)
-
-        self._save_path: str | None = None
+        act("Open Audio…",    slot=lambda: self.transport.btn_open_audio.click())
 
     # ------------------------------------------------------------------
     # UI layout
@@ -167,57 +243,66 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # Transport bar
+        # Transport bar (full width)
         self.transport = TransportBar(self.controller)
         root.addWidget(self.transport)
 
-        # DAW row: headers | timeline
+        # Main area: horizontal split [properties | DAW+visualizer]
+        h_split = QSplitter(Qt.Horizontal)
+        h_split.setStyleSheet("QSplitter::handle { background: #333; width: 2px; }")
+
+        # Left: properties panel (always visible, shows "no selection" state)
+        self.properties = PropertiesPanel()
+        self.properties.setMinimumWidth(200)
+        self.properties.setMaximumWidth(320)
+        h_split.addWidget(self.properties)
+
+        # Right: vertical split [headers+timeline | visualizer]
+        right = QWidget()
+        right.setStyleSheet("background: #1a1a1a;")
+        right_vbox = QVBoxLayout(right)
+        right_vbox.setContentsMargins(0, 0, 0, 0)
+        right_vbox.setSpacing(0)
+
         daw_row = QHBoxLayout()
         daw_row.setContentsMargins(0, 0, 0, 0)
         daw_row.setSpacing(0)
 
-        self.headers = TrackHeaderPanel(self.project)
-        self.timeline = TimelineWidget(self.project)
+        self.headers  = TrackHeaderPanel(project)
+        self.timeline = TimelineWidget(project)
         daw_row.addWidget(self.headers)
         daw_row.addWidget(self.timeline, stretch=1)
 
         daw_widget = QWidget()
         daw_widget.setLayout(daw_row)
 
-        # LED visualizer strip
         self.visualizer = VisualizerWidget(self.mapper)
         self.visualizer.setMinimumHeight(60)
 
-        # Properties panel (collapses when nothing selected)
-        self.properties = PropertiesPanel()
-        self.properties.setMaximumHeight(200)
-        self.properties.setMinimumHeight(0)
-        self.properties.hide()
+        v_split = QSplitter(Qt.Vertical)
+        v_split.setStyleSheet("QSplitter::handle { background: #333; height: 2px; }")
+        v_split.addWidget(daw_widget)
+        v_split.addWidget(self.visualizer)
+        v_split.setSizes([520, 100])
 
-        # Vertical splitter: DAW / visualizer / properties
-        self._splitter = QSplitter(Qt.Vertical)
-        self._splitter.addWidget(daw_widget)
-        self._splitter.addWidget(self.visualizer)
-        self._splitter.setSizes([460, 100])
-        self._splitter.setStyleSheet(
-            "QSplitter::handle { background: #333; height: 2px; }"
-        )
+        right_vbox.addWidget(v_split)
+        h_split.addWidget(right)
+        h_split.setSizes([240, 1160])
 
-        root.addWidget(self._splitter, stretch=1)
-        root.addWidget(self.properties)
+        root.addWidget(h_split, stretch=1)
 
     # ------------------------------------------------------------------
     # Signal wiring
     # ------------------------------------------------------------------
     def _wire_signals(self):
-        # Ruler click → seek
         self.timeline.seek_requested.connect(self.controller.seek)
-
-        # Clip click → properties panel
         self.timeline.clip_selected.connect(self._on_clip_selected)
+        self.transport.audio_loaded.connect(self._on_audio_loaded)
+        self.properties.params_changed.connect(self._render_current_frame)
 
-        # Click on empty area → clear properties
-        # (handled by deselecting in the scene — see _on_frame background clear)
+        # Spacebar = play/pause (global shortcut)
+        space = QShortcut(QKeySequence(Qt.Key_Space), self)
+        space.activated.connect(self.transport.toggle_play_pause)
 
     # ------------------------------------------------------------------
     # Slots
@@ -228,33 +313,48 @@ class MainWindow(QMainWindow):
         self.timeline.update_playhead(current_t)
 
     def _on_clip_selected(self, clip):
-        # Find the subtrack and track that own this clip so the panel can
-        # show resolved (inherited) values alongside clip-level overrides.
         for track in self.project.tracks:
             for subtrack in track.sub_tracks:
                 if clip in subtrack.clips:
                     self.properties.show_clip(clip, subtrack, track)
-                    self.properties.show()
                     return
-        # Fallback: show with no cascade context
         self.properties.show_clip(clip)
-        self.properties.show()
+
+    def _render_current_frame(self):
+        """Live preview: re-render at current playhead position and push to visualizer."""
+        try:
+            universes = self.compositor.render_frame(self.controller.playhead_time)
+            if universes:
+                self.visualizer.update_frame(next(iter(universes.values())))
+        except Exception as e:
+            logger.warning(f"Live preview error: {e}")
+
+    def _on_audio_loaded(self, path: str):
+        """Start background spectrogram analysis when audio is loaded."""
+        from pathlib import Path
+        self.headers.audio_header.set_filename(Path(path).name)
+
+        # Cancel any previous analysis
+        if self._analysis_worker and self._analysis_worker.isRunning():
+            self._analysis_worker.terminate()
+
+        self._analysis_worker = AudioAnalysisWorker(path, target_width=2000, target_height=80)
+        self._analysis_worker.result.connect(self.timeline.set_audio_image)
+        self._analysis_worker.start()
+        logger.info(f"Spectrogram analysis started for {Path(path).name}")
 
     # ------------------------------------------------------------------
     # File menu actions
     # ------------------------------------------------------------------
-    def _action_new_project(self):
-        reply = QMessageBox.question(
-            self, "New Project",
-            "Discard current project and start fresh?",
+    def _action_new(self):
+        if QMessageBox.question(
+            self, "New Project", "Discard current project and start fresh?",
             QMessageBox.Yes | QMessageBox.Cancel,
-        )
-        if reply == QMessageBox.Yes:
+        ) == QMessageBox.Yes:
             self.controller.stop()
-            project, mapper = build_demo_project()
-            self._reload_project(project, mapper)
+            self._reload_project(*build_demo_project())
 
-    def _action_open_project(self):
+    def _action_open(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Open Project", "",
             "Titan Project (*.titanproj);;All Files (*)",
@@ -266,30 +366,22 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Open failed", str(e))
             return
-        # Rebuild mapper from project's spatial_map + a placeholder fixture list
-        # (full fixture patch editor is a future feature — use project data as-is)
-        fixture_map = {seg.fixture_id: seg for seg in project.spatial_map}
         fixtures = [
-            PhysicalFixture(
-                fixture_id=seg.fixture_id,
-                universe=1,
-                start_address=1,
-                pixel_count=20,
-                channels_per_pixel=4,
-            )
+            PhysicalFixture(seg.fixture_id, universe=1, start_address=1,
+                            pixel_count=20, channels_per_pixel=4)
             for seg in project.spatial_map
         ]
         mapper = SpatialMapper(hardware_patch=fixtures, layout=project.spatial_map)
         self._save_path = path
         self._reload_project(project, mapper)
 
-    def _action_save_project(self):
+    def _action_save(self):
         if self._save_path:
             self._save_to(self._save_path)
         else:
-            self._action_save_project_as()
+            self._action_save_as()
 
-    def _action_save_project_as(self):
+    def _action_save_as(self):
         path, _ = QFileDialog.getSaveFileName(
             self, "Save Project As", "",
             "Titan Project (*.titanproj);;All Files (*)",
@@ -307,7 +399,6 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Save failed", str(e))
 
     def _reload_project(self, project: Project, mapper: SpatialMapper):
-        """Swap in a new project without recreating the window."""
         self.controller.stop()
         self.project = project
         self.mapper = mapper
@@ -324,13 +415,14 @@ class MainWindow(QMainWindow):
         self.timeline.project = project
         self.timeline.refresh()
         self.properties.clear()
-        self.properties.hide()
         self.setWindowTitle(f"Titan Engine v4 — {project.name}")
         self._wire_signals()
 
     def closeEvent(self, event):
         self.controller.stop()
         self.output_manager.close()
+        if self._analysis_worker and self._analysis_worker.isRunning():
+            self._analysis_worker.terminate()
         logger.info("Shutdown complete")
         super().closeEvent(event)
 

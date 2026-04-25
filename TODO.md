@@ -31,10 +31,17 @@ Build order follows the risk-first sequence from PLAN.md: data model → rendere
 - [x] **`widgets/timeline.py` — Y-axis lock bug** — `ClipItem` now locks Y to its track lane; dragging can no longer pull clips off their track
 - [x] **`widgets/timeline.py` — zoom & scroll** — horizontal zoom (Cmd/Meta + scroll); horizontal scroll bar always visible
 - [x] **`widgets/timeline.py` — clip resize handles** — left/right 8 px edge handles; left handle moves `clip.start` and adjusts `clip.duration`; right handle stretches `clip.duration`; Y-lock preserved during resize; resize cursor on hover
-- [x] **`widgets/timeline.py` — ruler click-to-seek** — `TimeRulerItem` emits `seek_requested` signal; `TimelineWidget` forwards it; `main.py` wires to `controller.seek()`
+- [x] **`widgets/timeline.py` — ruler click-to-seek** — seek handling moved to view level (`mousePressEvent`) with scrub flag; `TimeRulerItem` uses `Qt.NoButton` to avoid event conflicts; `seek_requested` signal wired to `controller.seek()`
 - [x] **`widgets/timeline.py` — `clip_selected` signal** — clicking a clip emits `clip_selected(clip)`; wired to `PropertiesPanel.show_clip()` in `main.py`
+- [x] **`widgets/timeline.py` — audio spectrogram row** — `AudioTrackItem` paints `QImage` spectrogram (or placeholder); `set_audio_image()` receives result from `AudioAnalysisWorker`; row is above all clip lanes
+- [x] **`widgets/track_header.py` — audio track header** — `AudioTrackHeader` matches audio row height; `set_filename()` changes label color from gray to blue
+- [x] **`widgets/transport.py` — combined play/pause toggle** — single checkable button (▶ / ⏸); `toggle_play_pause()` for spacebar; `_refresh_display()` syncs state from controller
+- [x] **`main.py` — spacebar shortcut** — `QShortcut(Qt.Key_Space)` wired to `transport.toggle_play_pause()`
+- [x] **`main.py` — left properties sidebar** — `PropertiesPanel` in fixed 240 px left panel always visible; `QSplitter(Qt.Horizontal)` separates it from timeline area
+- [x] **`main.py` — live parameter preview** — `properties.params_changed` → `_render_current_frame()` re-renders at current playhead position even when stopped
+- [x] **`main.py` — `AudioAnalysisWorker`** — numpy-only spectrogram (no librosa): STFT with Hanning window, log-scale, lower-60% frequency crop, vertical resize, flip, colorize; emits `QImage`
 - [ ] **`widgets/timeline.py` — multi-track vertical scroll** — scroll area for > 6 tracks; track lanes expand/collapse
-- [ ] **`widgets/timeline.py` — waveform underlay** — compute spectrogram with `librosa` at file-load time; render as `QImage` behind clips
+- [ ] **`widgets/timeline.py` — waveform underlay on clip lanes** — optional per-track audio waveform behind clips
 
 ## Phase 4: GUI — Properties & Editing
 
@@ -70,8 +77,8 @@ Build order follows the risk-first sequence from PLAN.md: data model → rendere
 
 ## Known Issues / Bugs to Fix
 
-- [ ] **`compositor.py` — Python per-LED loop** — `for led in physical_leds` in `render_frame()` must be vectorized with numpy before the engine can scale
-- [ ] **`playback.py` — clock jitter** — `time.perf_counter` loop has OS scheduling jitter; replace with `sounddevice` PaTime
-- [ ] **`compositor.py` — LED index lookup** — `next(i for i, p in self.led_to_dmx.items() if p["address"] == led["address"])` is O(n) per LED per frame; pre-build a reverse address→index dict at `__init__` time
+- [x] **`compositor.py` — Python per-LED loop** — vectorized with numpy boolean range queries + broadcast multiply; no per-LED Python iteration
+- [x] **`playback.py` — clock jitter** — `sounddevice` PaTime drives playhead when audio loaded; `perf_counter` fallback otherwise
+- [x] **`compositor.py` — LED index lookup** — pre-baked `_led_xs`, `_led_addrs`, `_led_channels`, `_led_universes` arrays built in `__init__`; O(1) boolean indexing per frame
 - [ ] **`models/project.py`** — `SpatialSegment` is defined but not yet part of `Project` dataclass (not linked to `Track.fixture_ids`)
 - [ ] **`test_arch.py`** — playhead loops at 6 s but never stops cleanly; add proper `QApplication.quit()` path

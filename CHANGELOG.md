@@ -1,5 +1,26 @@
 # Changelog
 
+## [2026-04-24] - Ruler seek, left properties panel, live preview, combined play/pause, spacebar, audio spectrogram track
+
+### Added
+- `widgets/constants.py` — `AUDIO_TRACK_HEIGHT = 80` constant used by both timeline and track header
+- `main.py` — `AudioAnalysisWorker(QThread)`: loads mono audio with `soundfile`, computes STFT with numpy `rfft` + Hanning window, log-scales, crops lower 60% of frequency range, resizes vertically, flips (low freq at bottom), colorizes with r/g/b channel math, emits `QImage`; `_on_audio_loaded()` starts the worker and updates `headers.audio_header.set_filename()`
+- `main.py` — `QShortcut(Qt.Key_Space)` global shortcut wired to `transport.toggle_play_pause()`
+- `main.py` — `_render_current_frame()` re-renders at current playhead position via `compositor.render_frame()` and pushes to visualizer; connected to `properties.params_changed` for live preview while stopped
+
+### Changed
+- `widgets/transport.py` — combined Play + Pause into a single checkable `btn_play_pause` toggle (▶ / ⏸); `toggle_play_pause()` public method for spacebar and any external caller; `_refresh_display()` syncs button visual state from `controller.is_playing`
+- `widgets/timeline.py` — ruler seek moved to **view level** (`TimelineWidget.mousePressEvent/mouseMoveEvent/mouseReleaseEvent`) with `_seeking` scrub flag; `TimeRulerItem` now uses `setAcceptedMouseButtons(Qt.NoButton)` to avoid event conflicts; added `AudioTrackItem` class (paints spectrogram `QImage` or placeholder text); `_LANES_Y = RULER_HEIGHT + AUDIO_TRACK_HEIGHT` shifts all clip lanes below the audio row; `set_audio_image(qimage)` wires into analysis worker
+- `widgets/track_header.py` — added `AudioTrackHeader` (dark-blue theme, `set_filename()` method, height = `AUDIO_TRACK_HEIGHT`); `TrackHeaderPanel` inserts it between ruler spacer and clip track rows
+- `widgets/properties.py` — `_ParamRow` gains `changed = Signal()` emitted on both checkbox toggle and spinbox value write; `PropertiesPanel` gains `params_changed = Signal()` forwarded from all rows; wired in `main.py` for live preview
+- `main.py` — layout restructured: transport bar full-width; `QSplitter(Qt.Horizontal)` splits `[PropertiesPanel 240 px | right area]`; right area is `QSplitter(Qt.Vertical)` splitting `[DAW headers+timeline | visualizer]`
+
+### Fixed
+- Ruler click had no effect — item-level `mousePressEvent` was being consumed by the scene before it reached the ruler; fixed by moving seek handling to the view level
+- Properties panel was below the timeline — moved to a fixed-width left sidebar that is always visible
+- Parameter changes while stopped had no visual feedback — live preview re-render now fires on every `params_changed` emission
+- Play and Pause were separate buttons — merged into one checkable toggle
+
 ## [2026-04-24] - Clip resize handles, ruler seek, properties panel, audio loader, file menu
 
 ### Added

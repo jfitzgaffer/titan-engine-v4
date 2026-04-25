@@ -1,11 +1,41 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QComboBox
 from PySide6.QtCore import Qt
 
-from widgets.constants import TRACK_HEIGHT, RULER_HEIGHT
+from widgets.constants import TRACK_HEIGHT, RULER_HEIGHT, AUDIO_TRACK_HEIGHT
+
+
+class AudioTrackHeader(QWidget):
+    """Left-side header for the audio reference row."""
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedHeight(AUDIO_TRACK_HEIGHT)
+        self.setStyleSheet("background: #151525; border-bottom: 1px solid #333;")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(4)
+
+        title = QLabel("Audio")
+        title.setStyleSheet("color: #8888cc; font-weight: bold; font-size: 11px; border: none;")
+
+        self._filename = QLabel("No audio")
+        self._filename.setStyleSheet(
+            "color: #555; font-size: 10px; border: none; font-style: italic;"
+        )
+        self._filename.setWordWrap(True)
+
+        layout.addWidget(title)
+        layout.addWidget(self._filename)
+        layout.addStretch()
+
+    def set_filename(self, name: str):
+        self._filename.setText(name)
+        self._filename.setStyleSheet("color: #8888cc; font-size: 10px; border: none;")
 
 
 class SingleTrackHeader(QWidget):
-    """Left-side header for one track: name, blend mode, opacity."""
+    """Left-side header for one clip track: name, blend mode, opacity."""
 
     def __init__(self, track, track_index: int = 0):
         super().__init__()
@@ -39,7 +69,7 @@ class SingleTrackHeader(QWidget):
         top_row.addStretch()
         top_row.addWidget(self.blend_combo)
 
-        # Bottom row: opacity slider
+        # Bottom row: opacity
         bottom_row = QHBoxLayout()
         bottom_row.setSpacing(4)
 
@@ -52,8 +82,10 @@ class SingleTrackHeader(QWidget):
         self.op_slider.setValue(int(self.track.opacity * 100))
         self.op_slider.setStyleSheet("""
             QSlider::groove:horizontal { height: 4px; background: #555; border-radius: 2px; }
-            QSlider::handle:horizontal { width: 10px; height: 10px; background: #00ff66;
-                                         border-radius: 5px; margin: -3px 0; }
+            QSlider::handle:horizontal {
+                width: 10px; height: 10px; background: #00ff66;
+                border-radius: 5px; margin: -3px 0;
+            }
         """)
         self.op_slider.valueChanged.connect(self._on_opacity_change)
 
@@ -77,23 +109,28 @@ class SingleTrackHeader(QWidget):
 
 
 class TrackHeaderPanel(QWidget):
-    """Left-hand column containing all track headers, aligned with the timeline."""
+    """Left column: audio header + one row per clip track."""
 
     def __init__(self, project):
         super().__init__()
-        self.setFixedWidth(200)
+        self.setFixedWidth(180)
         self.setStyleSheet("background-color: #2a2a2a;")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Spacer matching the timeline's ruler height
+        # Ruler spacer
         ruler_spacer = QWidget()
         ruler_spacer.setFixedHeight(RULER_HEIGHT)
         ruler_spacer.setStyleSheet("background-color: #222222; border-bottom: 1px solid #111;")
         layout.addWidget(ruler_spacer)
 
+        # Audio track header
+        self.audio_header = AudioTrackHeader()
+        layout.addWidget(self.audio_header)
+
+        # Clip track rows
         for i, track in enumerate(project.tracks):
             layout.addWidget(SingleTrackHeader(track, track_index=i))
 

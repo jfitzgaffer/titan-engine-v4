@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QCheckBox, QDoubleSpinBox, QScrollArea, QFrame, QSizePolicy,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 
 from models.project import ParameterSet, resolve_params
@@ -61,6 +61,8 @@ _SPIN_DISABLED = "QDoubleSpinBox { background: #222; color: #555; border: 1px so
 
 class _ParamRow(QWidget):
     """One parameter: checkbox + label + spinbox."""
+
+    changed = Signal()   # emitted any time a value is written to params
 
     def __init__(self, field_name: str):
         super().__init__()
@@ -120,20 +122,27 @@ class _ParamRow(QWidget):
             setattr(self._params, self.field_name, None)
         self.spin.setEnabled(checked)
         self.spin.setStyleSheet(_SPIN_ENABLED if checked else _SPIN_DISABLED)
+        self.changed.emit()
 
     def _on_value(self, val: float):
         if self._loading or self._params is None:
             return
         if self.chk.isChecked():
             setattr(self._params, self.field_name, val)
+            self.changed.emit()
 
 
 class PropertiesPanel(QWidget):
     """
     Shows and edits the ParameterSet of the selected Clip.
     Call show_clip(clip, subtrack, track) when selection changes.
-    Call clear() to collapse when nothing is selected.
+    Call clear() when nothing is selected.
+
+    params_changed is emitted any time a parameter value is written,
+    including while the playhead is stopped — connect to a live-preview slot.
     """
+
+    params_changed = Signal()   # forward from any _ParamRow.changed
 
     def __init__(self):
         super().__init__()
@@ -179,6 +188,7 @@ class PropertiesPanel(QWidget):
             col_widgets = [[], [], []]
             for i, name in enumerate(field_names):
                 row = _ParamRow(name)
+                row.changed.connect(self.params_changed)
                 self._rows[name] = row
                 col_widgets[i % 3].append(row)
 

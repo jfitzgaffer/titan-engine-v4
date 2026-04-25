@@ -5,9 +5,9 @@ from PySide6.QtCore import Qt, QTimer, Signal
 
 
 class TransportBar(QWidget):
-    """Play / Pause / Stop bar with time display and audio file loader."""
+    """Single ▶/⏸ toggle + Stop + time display + Open Audio."""
 
-    audio_loaded = Signal(str)   # emitted with file path after successful load
+    audio_loaded = Signal(str)   # file path after successful load
 
     def __init__(self, controller=None):
         super().__init__()
@@ -25,8 +25,9 @@ class TransportBar(QWidget):
                 border: 1px solid #555; border-radius: 4px;
                 font-size: 14px; min-width: 32px; min-height: 26px;
             }
-            QPushButton:hover  { background: #3e3e3e; }
+            QPushButton:hover   { background: #3e3e3e; }
             QPushButton:pressed { background: #1a1a1a; }
+            QPushButton:checked { background: #1a5533; border-color: #00ff66; }
         """
         open_style = """
             QPushButton {
@@ -34,48 +35,44 @@ class TransportBar(QWidget):
                 border: 1px solid #555; border-radius: 4px;
                 font-size: 11px; padding: 0 8px; min-height: 26px;
             }
-            QPushButton:hover  { background: #3e3e3e; color: white; }
+            QPushButton:hover   { background: #3e3e3e; color: white; }
             QPushButton:pressed { background: #1a1a1a; }
         """
 
-        self.btn_play  = QPushButton("▶")
-        self.btn_pause = QPushButton("⏸")
-        self.btn_stop  = QPushButton("⏹")
+        # Single play/pause toggle
+        self.btn_play_pause = QPushButton("▶")
+        self.btn_play_pause.setCheckable(True)
+        self.btn_play_pause.setToolTip("Play / Pause  (Space)")
+        self.btn_play_pause.setStyleSheet(btn_style)
 
-        for btn in (self.btn_play, self.btn_pause, self.btn_stop):
-            btn.setStyleSheet(btn_style)
-
-        self.btn_play.setToolTip("Play (Space)")
-        self.btn_pause.setToolTip("Pause")
+        self.btn_stop = QPushButton("⏹")
         self.btn_stop.setToolTip("Stop & rewind")
+        self.btn_stop.setStyleSheet(btn_style)
 
         self.time_label = QLabel("0:00.000")
         self.time_label.setStyleSheet(
-            "color: #00ff66; font-family: 'Menlo', 'Courier New'; font-size: 13px; "
+            "color: #00ff66; font-family: 'Menlo', 'Courier New'; font-size: 13px;"
             "min-width: 80px; border: none;"
         )
         self.time_label.setAlignment(Qt.AlignCenter)
 
-        # Separator
         sep = QLabel("|")
         sep.setStyleSheet("color: #444; border: none;")
 
         self.btn_open_audio = QPushButton("Open Audio…")
         self.btn_open_audio.setStyleSheet(open_style)
-        self.btn_open_audio.setToolTip("Load a WAV, FLAC, or OGG file as the backing track")
+        self.btn_open_audio.setToolTip("Load WAV / FLAC / OGG as backing track")
 
         self.audio_label = QLabel("No audio loaded")
         self.audio_label.setStyleSheet(
             "color: #666; font-size: 11px; border: none; font-style: italic;"
         )
 
-        self.btn_play.clicked.connect(self._play)
-        self.btn_pause.clicked.connect(self._pause)
+        self.btn_play_pause.clicked.connect(self._toggle_play)
         self.btn_stop.clicked.connect(self._stop)
         self.btn_open_audio.clicked.connect(self._open_audio_dialog)
 
-        layout.addWidget(self.btn_play)
-        layout.addWidget(self.btn_pause)
+        layout.addWidget(self.btn_play_pause)
         layout.addWidget(self.btn_stop)
         layout.addSpacing(8)
         layout.addWidget(self.time_label)
@@ -94,24 +91,30 @@ class TransportBar(QWidget):
     def set_controller(self, controller):
         self.controller = controller
 
-    def _play(self):
-        if self.controller:
-            self.controller.play()
+    def toggle_play_pause(self):
+        """Called by spacebar shortcut or button click."""
+        self.btn_play_pause.click()
 
-    def _pause(self):
-        if self.controller:
+    def _toggle_play(self, checked: bool):
+        if not self.controller:
+            return
+        if checked:
+            self.controller.play()
+            self.btn_play_pause.setText("⏸")
+        else:
             self.controller.pause()
+            self.btn_play_pause.setText("▶")
 
     def _stop(self):
         if self.controller:
             self.controller.stop()
+        self.btn_play_pause.setChecked(False)
+        self.btn_play_pause.setText("▶")
 
     def _open_audio_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open Audio File",
-            "",
-            "Audio Files (*.wav *.flac *.ogg *.aif *.aiff *.mp3);;All Files (*)",
+            self, "Open Audio File", "",
+            "Audio Files (*.wav *.flac *.ogg *.aif *.aiff);;All Files (*)",
         )
         if not path:
             return
@@ -121,11 +124,8 @@ class TransportBar(QWidget):
             self.controller.pause()
 
         if self.controller and self.controller.load_audio(path):
-            name = Path(path).name
-            self.audio_label.setText(name)
-            self.audio_label.setStyleSheet(
-                "color: #00ff66; font-size: 11px; border: none;"
-            )
+            self.audio_label.setText(Path(path).name)
+            self.audio_label.setStyleSheet("color: #00ff66; font-size: 11px; border: none;")
             self.audio_loaded.emit(path)
             if was_playing:
                 self.controller.play()
@@ -138,8 +138,15 @@ class TransportBar(QWidget):
     def _refresh_display(self):
         if not self.controller:
             return
+        # Sync button state with controller
+        playing = self.controller.is_playing
+        if playing != self.btn_play_pause.isChecked():
+            self.btn_play_pause.blockSignals(True)
+            self.btn_play_pause.setChecked(playing)
+            self.btn_play_pause.setText("⏸" if playing else "▶")
+            self.btn_play_pause.blockSignals(False)
+
         t = self.controller.playhead_time
-        minutes = int(t // 60)
-        seconds = int(t % 60)
-        ms = int((t % 1) * 1000)
-        self.time_label.setText(f"{minutes}:{seconds:02d}.{ms:03d}")
+        self.time_label.setText(
+            f"{int(t // 60)}:{int(t % 60):02d}.{int((t % 1) * 1000):03d}"
+        )
