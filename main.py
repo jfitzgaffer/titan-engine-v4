@@ -296,6 +296,8 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _wire_signals(self):
         self.timeline.seek_requested.connect(self.controller.seek)
+        self.timeline.seek_requested.connect(self.timeline.update_playhead)
+        self.timeline.seek_requested.connect(self._render_current_frame)
         self.timeline.clip_selected.connect(self._on_clip_selected)
         self.transport.audio_loaded.connect(self._on_audio_loaded)
         self.properties.params_changed.connect(self._render_current_frame)
