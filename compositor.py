@@ -96,7 +96,12 @@ class CompositorEngine:
                 active = np.any(track_buffer > 0, axis=1)
                 master_buffer[active] = track_buffer[active]
             elif track.blending_mode == "Multiply":
-                master_buffer = master_buffer * track_buffer / 255.0
+                # Only darken pixels where this track has content; 0 = no effect
+                active = np.any(track_buffer > 0, axis=1)
+                if active.any():
+                    master_buffer[active] = master_buffer[active] * np.clip(
+                        track_buffer[active] / 255.0, 0.0, 1.0
+                    )
             else:  # Add (default)
                 master_buffer += track_buffer
 

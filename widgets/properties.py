@@ -1,23 +1,30 @@
 """
-PropertiesPanel — ParameterSet editor for the selected Clip.
+PropertiesPanel — editor for the selected Clip.
 
-Each parameter row has:
-  [☑ checkbox]  [label]  [spinbox]
+Layout (top to bottom):
+  • Timing row:      [Clip label]  Start: [spinbox]  Dur: [spinbox]
+  • Instances:       INSTANCES  N  [+] [−]
+                     #1  X: [spin]  W: [spin]
+                     #2  X: [spin]  W: [spin]  …
+  • Parameter groups: Color / Spatial / Envelope-C / Envelope-E / FX
+    Each field: [☑] label [spinbox]
+    Checked = own value; unchecked = inherit from track (shown gray).
 
-Checkbox checked  → this clip owns the value; spinbox is editable.
-Checkbox unchecked → value is None (inherits from SubTrack/Track); spinbox
-                     is disabled and shows the resolved inherited value in gray.
+Signals:
+  params_changed      — any value changed; connect to live-preview slot
+  clip_layout_changed — start / duration / pixel list changed;
+                        connect to timeline.refresh()
 """
 from dataclasses import fields as dc_fields
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QCheckBox, QDoubleSpinBox, QScrollArea, QFrame, QSizePolicy,
+    QCheckBox, QDoubleSpinBox, QScrollArea, QFrame,
+    QPushButton,
 )
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont
 
-from models.project import ParameterSet, resolve_params
+from models.project import ParameterSet, VirtualPixel, resolve_params
 
 
 # (display_label, min, max, single_step, decimals)
@@ -52,17 +59,88 @@ _GROUPS = [
     ("FX",                ["glitch_digi", "glitch_ana", "overdrive", "knee", "eq_tilt"]),
 ]
 
-_LABEL_STYLE  = "color: #aaa; font-size: 11px; border: none; min-width: 72px;"
-_HEADER_STYLE = "color: #666; font-size: 10px; border: none; margin-top: 6px;"
-_TITLE_STYLE  = "color: #ccc; font-size: 12px; font-weight: bold; border: none;"
+_LABEL_STYLE   = "color: #aaa; font-size: 11px; border: none; min-width: 52px;"
+_HEADER_STYLE  = "color: #666; font-size: 10px; border: none; margin-top: 6px;"
+_TITLE_STYLE   = "color: #ccc; font-size: 12px; font-weight: bold; border: none;"
 _SPIN_ENABLED  = "QDoubleSpinBox { background: #2a2a2a; color: white; border: 1px solid #555; padding: 1px 4px; }"
 _SPIN_DISABLED = "QDoubleSpinBox { background: #222; color: #555; border: 1px solid #333; padding: 1px 4px; }"
+_SPIN_TIME     = ("QDoubleSpinBox { background: #2a2a2a; color: #00ff66; "
+                  "border: 1px solid #555; padding: 1px 4px; min-width: 62px; }")
+_BTN_STYLE     = ("QPushButton { background: #2e2e2e; color: white; border: 1px solid #555; "
+                  "border-radius: 3px; font-size: 12px; min-width: 22px; min-height: 18px; padding: 0 4px; }"
+                  "QPushButton:hover { background: #3e3e3e; }"
+                  "QPushButton:pressed { background: #1a1a1a; }")
+
+_MAX_PIXELS = 8   # pre-allocated pixel rows
+
+
+class _PixelRow(QWidget):
+    """One VirtualPixel: index label + X spinbox + Width spinbox."""
+
+    changed = Signal()
+
+    def __init__(self, idx: int):
+        super().__init__()
+        self._pixel: VirtualPixel | None = None
+        self._loading = False
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 1, 0, 1)
+        row.setSpacing(4)
+
+        num = QLabel(f"#{idx + 1}")
+        num.setStyleSheet("color: #666; font-size: 10px; border: none; min-width: 20px;")
+
+        x_lbl = QLabel("X")
+        x_lbl.setStyleSheet("color: #aaa; font-size: 11px; border: none; min-width: 14px;")
+        self.x_spin = QDoubleSpinBox()
+        self.x_spin.setRange(0.0, 1.0)
+        self.x_spin.setSingleStep(0.05)
+        self.x_spin.setDecimals(3)
+        self.x_spin.setFixedWidth(72)
+        self.x_spin.setStyleSheet(_SPIN_ENABLED)
+
+        w_lbl = QLabel("W")
+        w_lbl.setStyleSheet("color: #aaa; font-size: 11px; border: none; min-width: 14px;")
+        self.w_spin = QDoubleSpinBox()
+        self.w_spin.setRange(0.01, 1.0)
+        self.w_spin.setSingleStep(0.05)
+        self.w_spin.setDecimals(3)
+        self.w_spin.setFixedWidth(72)
+        self.w_spin.setStyleSheet(_SPIN_ENABLED)
+
+        row.addWidget(num)
+        row.addWidget(x_lbl)
+        row.addWidget(self.x_spin)
+        row.addWidget(w_lbl)
+        row.addWidget(self.w_spin)
+        row.addStretch()
+
+        self.x_spin.valueChanged.connect(self._on_x)
+        self.w_spin.valueChanged.connect(self._on_w)
+
+    def load(self, pixel: VirtualPixel):
+        self._pixel = pixel
+        self._loading = True
+        self.x_spin.setValue(pixel.x)
+        self.w_spin.setValue(pixel.width)
+        self._loading = False
+
+    def _on_x(self, val: float):
+        if not self._loading and self._pixel:
+            self._pixel.x = val
+            self.changed.emit()
+
+    def _on_w(self, val: float):
+        if not self._loading and self._pixel:
+            self._pixel.width = val
+            self.changed.emit()
 
 
 class _ParamRow(QWidget):
     """One parameter: checkbox + label + spinbox."""
 
-    changed = Signal()   # emitted any time a value is written to params
+    changed = Signal()
 
     def __init__(self, field_name: str):
         super().__init__()
@@ -104,11 +182,9 @@ class _ParamRow(QWidget):
         self._loading = True
         val = getattr(params, self.field_name)
         has_own = val is not None
-
         self.chk.setChecked(has_own)
         self.spin.setEnabled(has_own)
         self.spin.setStyleSheet(_SPIN_ENABLED if has_own else _SPIN_DISABLED)
-
         display = val if has_own else (resolved_val or 0.0)
         self.spin.setValue(display if display is not None else 0.0)
         self._loading = False
@@ -116,38 +192,35 @@ class _ParamRow(QWidget):
     def _on_toggle(self, checked: bool):
         if self._loading or self._params is None:
             return
-        if checked:
-            setattr(self._params, self.field_name, self.spin.value())
-        else:
-            setattr(self._params, self.field_name, None)
+        setattr(self._params, self.field_name, self.spin.value() if checked else None)
         self.spin.setEnabled(checked)
         self.spin.setStyleSheet(_SPIN_ENABLED if checked else _SPIN_DISABLED)
         self.changed.emit()
 
     def _on_value(self, val: float):
-        if self._loading or self._params is None:
-            return
-        if self.chk.isChecked():
+        if not self._loading and self._params and self.chk.isChecked():
             setattr(self._params, self.field_name, val)
             self.changed.emit()
 
 
 class PropertiesPanel(QWidget):
     """
-    Shows and edits the ParameterSet of the selected Clip.
-    Call show_clip(clip, subtrack, track) when selection changes.
-    Call clear() when nothing is selected.
+    Shows and edits the selected Clip: timing, pixel instances, and ParameterSet.
 
-    params_changed is emitted any time a parameter value is written,
-    including while the playhead is stopped — connect to a live-preview slot.
+    params_changed      — any value written; connect to live-preview slot
+    clip_layout_changed — start/duration or pixel list changed;
+                          connect to timeline.refresh()
     """
 
-    params_changed = Signal()   # forward from any _ParamRow.changed
+    params_changed      = Signal()
+    clip_layout_changed = Signal()
 
     def __init__(self):
         super().__init__()
         self._clip = None
         self._rows: dict[str, _ParamRow] = {}
+        self._pixel_rows: list[_PixelRow] = []
+        self._loading = False
 
         self.setStyleSheet("background: #1e1e1e; border-top: 1px solid #333;")
         self.setMinimumHeight(0)
@@ -156,12 +229,42 @@ class PropertiesPanel(QWidget):
         outer.setContentsMargins(12, 6, 12, 6)
         outer.setSpacing(0)
 
-        # Title row
+        # ── Timing header ──────────────────────────────────────────────
+        timing_row = QHBoxLayout()
+        timing_row.setSpacing(6)
+
         self._title = QLabel("No clip selected")
         self._title.setStyleSheet(_TITLE_STYLE)
-        outer.addWidget(self._title)
 
-        # Scrollable content
+        start_lbl = QLabel("Start")
+        start_lbl.setStyleSheet("color: #aaa; font-size: 11px; border: none;")
+        self._start_spin = QDoubleSpinBox()
+        self._start_spin.setRange(0.0, 3600.0)
+        self._start_spin.setSingleStep(0.1)
+        self._start_spin.setDecimals(2)
+        self._start_spin.setFixedWidth(70)
+        self._start_spin.setStyleSheet(_SPIN_TIME)
+        self._start_spin.setSuffix(" s")
+
+        dur_lbl = QLabel("Dur")
+        dur_lbl.setStyleSheet("color: #aaa; font-size: 11px; border: none;")
+        self._dur_spin = QDoubleSpinBox()
+        self._dur_spin.setRange(0.01, 3600.0)
+        self._dur_spin.setSingleStep(0.1)
+        self._dur_spin.setDecimals(2)
+        self._dur_spin.setFixedWidth(70)
+        self._dur_spin.setStyleSheet(_SPIN_TIME)
+        self._dur_spin.setSuffix(" s")
+
+        timing_row.addWidget(self._title)
+        timing_row.addStretch()
+        timing_row.addWidget(start_lbl)
+        timing_row.addWidget(self._start_spin)
+        timing_row.addWidget(dur_lbl)
+        timing_row.addWidget(self._dur_spin)
+        outer.addLayout(timing_row)
+
+        # ── Scrollable content ─────────────────────────────────────────
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
@@ -174,7 +277,40 @@ class PropertiesPanel(QWidget):
         self._content_layout.setContentsMargins(0, 4, 0, 4)
         self._content_layout.setSpacing(0)
 
-        # Build all rows up-front (hidden until a clip is selected)
+        # ── Instances section ──────────────────────────────────────────
+        inst_hdr = QHBoxLayout()
+        inst_hdr.setSpacing(4)
+        inst_label = QLabel("INSTANCES")
+        inst_label.setStyleSheet(_HEADER_STYLE)
+        self._inst_count = QLabel("0")
+        self._inst_count.setStyleSheet("color: #888; font-size: 10px; border: none; min-width: 16px;")
+        btn_add = QPushButton("+")
+        btn_add.setStyleSheet(_BTN_STYLE)
+        btn_add.setToolTip("Add pixel instance")
+        btn_rem = QPushButton("−")
+        btn_rem.setStyleSheet(_BTN_STYLE)
+        btn_rem.setToolTip("Remove last pixel instance")
+        inst_hdr.addWidget(inst_label)
+        inst_hdr.addWidget(self._inst_count)
+        inst_hdr.addStretch()
+        inst_hdr.addWidget(btn_add)
+        inst_hdr.addWidget(btn_rem)
+        self._content_layout.addLayout(inst_hdr)
+
+        self._pixel_container = QWidget()
+        self._pixel_container.setStyleSheet("background: transparent;")
+        pixel_vbox = QVBoxLayout(self._pixel_container)
+        pixel_vbox.setContentsMargins(0, 0, 0, 0)
+        pixel_vbox.setSpacing(0)
+        for i in range(_MAX_PIXELS):
+            pr = _PixelRow(i)
+            pr.changed.connect(self.params_changed)
+            pr.setVisible(False)
+            self._pixel_rows.append(pr)
+            pixel_vbox.addWidget(pr)
+        self._content_layout.addWidget(self._pixel_container)
+
+        # ── Parameter groups ───────────────────────────────────────────
         for group_label, field_names in _GROUPS:
             hdr = QLabel(group_label.upper())
             hdr.setStyleSheet(_HEADER_STYLE)
@@ -185,7 +321,7 @@ class PropertiesPanel(QWidget):
             grid_layout.setContentsMargins(0, 0, 0, 0)
             grid_layout.setSpacing(0)
 
-            col_widgets = [[], [], []]
+            col_widgets: list[list] = [[], [], []]
             for i, name in enumerate(field_names):
                 row = _ParamRow(name)
                 row.changed.connect(self.params_changed)
@@ -206,32 +342,91 @@ class PropertiesPanel(QWidget):
         scroll.setWidget(content)
         outer.addWidget(scroll, stretch=1)
 
-        self._set_visible(False)
+        # Wire
+        self._start_spin.valueChanged.connect(self._on_start_changed)
+        self._dur_spin.valueChanged.connect(self._on_dur_changed)
+        btn_add.clicked.connect(self._on_add_pixel)
+        btn_rem.clicked.connect(self._on_rem_pixel)
 
-    def _set_visible(self, visible: bool):
+        self._set_timing_visible(False)
+        self._set_params_visible(False)
+
+    # ── visibility helpers ─────────────────────────────────────────────
+
+    def _set_params_visible(self, visible: bool):
         for row in self._rows.values():
             row.setVisible(visible)
 
-    def show_clip(self, clip, subtrack=None, track=None):
-        """Load clip's ParameterSet into the editor. Pass subtrack+track for resolved hints."""
-        self._clip = clip
+    def _set_timing_visible(self, visible: bool):
+        self._start_spin.setVisible(visible)
+        self._dur_spin.setVisible(visible)
 
-        # Compute resolved values for inherit hints
+    # ── timing slots ──────────────────────────────────────────────────
+
+    def _on_start_changed(self, val: float):
+        if not self._loading and self._clip:
+            self._clip.start = val
+            self.clip_layout_changed.emit()
+
+    def _on_dur_changed(self, val: float):
+        if not self._loading and self._clip:
+            self._clip.duration = val
+            self.clip_layout_changed.emit()
+
+    # ── pixel instance slots ──────────────────────────────────────────
+
+    def _on_add_pixel(self):
+        if self._clip is None or len(self._clip.pixels) >= _MAX_PIXELS:
+            return
+        self._clip.pixels.append(VirtualPixel())
+        self._refresh_pixel_rows()
+        self.params_changed.emit()
+        self.clip_layout_changed.emit()
+
+    def _on_rem_pixel(self):
+        if self._clip is None or len(self._clip.pixels) <= 1:
+            return
+        self._clip.pixels.pop()
+        self._refresh_pixel_rows()
+        self.params_changed.emit()
+        self.clip_layout_changed.emit()
+
+    def _refresh_pixel_rows(self):
+        n = len(self._clip.pixels) if self._clip else 0
+        self._inst_count.setText(str(n))
+        for i, row in enumerate(self._pixel_rows):
+            if i < n:
+                row.load(self._clip.pixels[i])
+                row.setVisible(True)
+            else:
+                row.setVisible(False)
+
+    # ── public API ────────────────────────────────────────────────────
+
+    def show_clip(self, clip, subtrack=None, track=None):
+        self._clip = clip
+        self._loading = True
+
+        self._title.setText("Clip")
+        self._start_spin.setValue(clip.start)
+        self._dur_spin.setValue(clip.duration)
+        self._set_timing_visible(True)
+        self._refresh_pixel_rows()
+
         resolved = None
         if subtrack is not None and track is not None:
             resolved = resolve_params(clip, subtrack, track)
-
-        self._title.setText(
-            f"Clip  ·  start {clip.start:.2f}s  ·  dur {clip.duration:.2f}s"
-        )
-
         for name, row in self._rows.items():
             resolved_val = getattr(resolved, name) if resolved else None
             row.load(clip.params, resolved_val)
 
-        self._set_visible(True)
+        self._loading = False
+        self._set_params_visible(True)
 
     def clear(self):
         self._clip = None
         self._title.setText("No clip selected")
-        self._set_visible(False)
+        self._set_timing_visible(False)
+        self._set_params_visible(False)
+        for row in self._pixel_rows:
+            row.setVisible(False)

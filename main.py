@@ -49,10 +49,13 @@ class FrameBridge(QObject):
 # ------------------------------------------------------------------
 class AudioAnalysisWorker(QThread):
     """
-    Computes a colored spectrogram from an audio file in a background thread.
-    Emits result(QImage) when done. Uses only numpy — no librosa required.
+    Background audio analysis: spectrogram, waveform, and BPM.
+    All three are computed from the same audio load in one pass.
+    Uses only numpy + soundfile — no librosa required.
     """
-    result = Signal(object)   # QImage
+    spectrogram_ready = Signal(object)   # QImage
+    waveform_ready    = Signal(object)   # QImage
+    bpm_ready         = Signal(float)
 
     def __init__(self, audio_path: str, target_width: int = 2000, target_height: int = 80):
         super().__init__()
@@ -62,69 +65,110 @@ class AudioAnalysisWorker(QThread):
 
     def run(self):
         try:
-            qimg = self._compute()
-            if qimg is not None:
-                self.result.emit(qimg)
+            import soundfile as sf
+        except ImportError:
+            logger.warning("soundfile not installed — audio analysis unavailable")
+            return
+        try:
+            data, sr = sf.read(self._path, dtype='float32', always_2d=True)
+            mono = data.mean(axis=1)
+            spec_img = self._spectrogram(mono, sr)
+            wave_img = self._waveform(mono)
+            bpm      = self._detect_bpm(mono, sr)
+            if spec_img: self.spectrogram_ready.emit(spec_img)
+            if wave_img: self.waveform_ready.emit(wave_img)
+            if bpm > 0:  self.bpm_ready.emit(bpm)
         except Exception as e:
             logger.warning(f"Audio analysis failed: {e}")
 
-    def _compute(self) -> QImage | None:
-        try:
-            import soundfile as sf
-        except ImportError:
-            logger.warning("soundfile not installed — spectrogram unavailable")
-            return None
+    # ---- spectrogram ------------------------------------------------
 
-        data, sr = sf.read(self._path, dtype='float32', always_2d=True)
-        mono = data.mean(axis=1)
-
+    def _spectrogram(self, mono, sr) -> QImage | None:
         n_fft  = 2048
         n_freq = n_fft // 2 + 1
         hop    = max(1, len(mono) // self._w)
-
-        # Build STFT column by column
         window = np.hanning(n_fft).astype(np.float32)
-        n_frames = self._w
-        spec = np.zeros((n_freq, n_frames), dtype=np.float32)
-        for i in range(n_frames):
-            start = i * hop
-            chunk = mono[start: start + n_fft]
+        spec   = np.zeros((n_freq, self._w), dtype=np.float32)
+        for i in range(self._w):
+            chunk = mono[i * hop: i * hop + n_fft]
             if len(chunk) < n_fft:
                 chunk = np.pad(chunk, (0, n_fft - len(chunk)))
             spec[:, i] = np.abs(np.fft.rfft(chunk * window))
 
-        # Log amplitude, keep lower 60% of frequencies (musical range)
         cutoff = int(n_freq * 0.60)
-        spec = np.log1p(spec[:cutoff, :])
+        spec   = np.log1p(spec[:cutoff, :])
+        y_src  = np.linspace(0, cutoff - 1, self._h).astype(int)
+        spec   = np.flipud(spec[y_src, :])
 
-        # Resize vertically to target_height via linear interpolation
-        y_src = np.linspace(0, cutoff - 1, self._h).astype(int)
-        spec = spec[y_src, :]
-
-        # Flip so low frequencies are at the bottom
-        spec = np.flipud(spec)
-
-        # Normalize to [0, 1]
         s_min, s_max = spec.min(), spec.max()
-        if s_max > s_min:
-            spec = (spec - s_min) / (s_max - s_min)
-        else:
-            spec = np.zeros_like(spec)
+        spec = (spec - s_min) / (s_max - s_min) if s_max > s_min else np.zeros_like(spec)
 
-        # Colorize: black→purple→blue→cyan→green→yellow→red
         r = np.clip(spec * 3 - 1.5, 0, 1)
         g = np.clip(spec * 3 - 0.5, 0, 1) * np.clip(2.5 - spec * 3, 0, 1)
         b = np.clip(1.5 - spec * 3, 0, 1) + np.clip(spec * 3 - 2, 0, 1)
-
-        rgb = np.stack([
-            (r * 255).astype(np.uint8),
-            (g * 255).astype(np.uint8),
-            (b * 255).astype(np.uint8),
-        ], axis=2)
-
+        rgb = np.stack([(r * 255).astype(np.uint8),
+                        (g * 255).astype(np.uint8),
+                        (b * 255).astype(np.uint8)], axis=2)
         h, w = rgb.shape[:2]
         img = QImage(rgb.tobytes(), w, h, w * 3, QImage.Format_RGB888)
-        return img.copy()   # detach from the numpy buffer
+        return img.copy()
+
+    # ---- waveform ---------------------------------------------------
+
+    def _waveform(self, mono) -> QImage | None:
+        # Downsample to target_width RMS buckets
+        bucket = max(1, len(mono) // self._w)
+        n = (len(mono) // bucket) * bucket
+        rms = np.sqrt(np.mean(
+            mono[:n].reshape(-1, bucket) ** 2, axis=1
+        ))
+        # Resize to exactly target_width
+        xs = np.linspace(0, len(rms) - 1, self._w)
+        rms = rms[xs.astype(int)]
+        peak = rms.max()
+        if peak > 0:
+            rms /= peak
+
+        img_arr = np.zeros((self._h, self._w, 3), dtype=np.uint8)
+        mid = self._h // 2
+        for x in range(self._w):
+            half = int(rms[x] * mid)
+            y0 = max(0, mid - half)
+            y1 = min(self._h, mid + half + 1)
+            img_arr[y0:y1, x] = [0, 180, 100]   # green waveform
+
+        img = QImage(img_arr.tobytes(), self._w, self._h,
+                     self._w * 3, QImage.Format_RGB888)
+        return img.copy()
+
+    # ---- BPM detection (autocorrelation on onset envelope) ----------
+
+    def _detect_bpm(self, mono, sr) -> float:
+        hop = 512
+        n_frames = len(mono) // hop
+        if n_frames < 8:
+            return 0.0
+
+        # RMS onset envelope
+        env = np.sqrt(np.mean(
+            mono[: n_frames * hop].reshape(n_frames, hop) ** 2, axis=1
+        ))
+        env -= env.mean()
+
+        fps = sr / hop
+        min_p = max(1, int(fps * 60 / 200))   # 200 BPM upper limit
+        max_p = int(fps * 60 / 60)             # 60 BPM lower limit
+
+        if max_p >= len(env):
+            return 0.0
+
+        ac = np.correlate(env, env, mode='full')
+        ac = ac[len(ac) // 2:]
+        if max_p >= len(ac):
+            return 0.0
+
+        peak = np.argmax(ac[min_p: max_p + 1]) + min_p
+        return fps * 60.0 / peak if peak > 0 else 0.0
 
 
 # ------------------------------------------------------------------
@@ -299,10 +343,15 @@ class MainWindow(QMainWindow):
         self.timeline.seek_requested.connect(self.timeline.update_playhead)
         self.timeline.seek_requested.connect(self._render_current_frame)
         self.timeline.clip_selected.connect(self._on_clip_selected)
+        self.timeline.project_changed.connect(self._on_project_changed)
         self.transport.audio_loaded.connect(self._on_audio_loaded)
         self.properties.params_changed.connect(self._render_current_frame)
+        self.properties.clip_layout_changed.connect(self.timeline.refresh)
+        self.properties.clip_layout_changed.connect(self._render_current_frame)
 
-        # Spacebar = play/pause (global shortcut)
+        self.headers.audio_header.view_mode_changed.connect(self.timeline.set_audio_view_mode)
+        self.headers.audio_header.bpm_grid_toggled.connect(self.timeline.set_bpm_grid_visible)
+
         space = QShortcut(QKeySequence(Qt.Key_Space), self)
         space.activated.connect(self.transport.toggle_play_pause)
 
@@ -332,18 +381,36 @@ class MainWindow(QMainWindow):
             logger.warning(f"Live preview error: {e}")
 
     def _on_audio_loaded(self, path: str):
-        """Start background spectrogram analysis when audio is loaded."""
         from pathlib import Path
         self.headers.audio_header.set_filename(Path(path).name)
 
-        # Cancel any previous analysis
         if self._analysis_worker and self._analysis_worker.isRunning():
             self._analysis_worker.terminate()
 
         self._analysis_worker = AudioAnalysisWorker(path, target_width=2000, target_height=80)
-        self._analysis_worker.result.connect(self.timeline.set_audio_image)
+        self._analysis_worker.spectrogram_ready.connect(self.timeline.set_spectrogram_image)
+        self._analysis_worker.waveform_ready.connect(self.timeline.set_waveform_image)
+        self._analysis_worker.bpm_ready.connect(self._on_bpm_detected)
         self._analysis_worker.start()
-        logger.info(f"Spectrogram analysis started for {Path(path).name}")
+        logger.info(f"Audio analysis started for {Path(path).name}")
+
+    def _on_bpm_detected(self, bpm: float):
+        bpm_rounded = round(bpm, 1)
+        self.headers.audio_header.set_bpm(bpm_rounded)
+        self.timeline.set_bpm(bpm_rounded)
+        logger.info(f"BPM detected: {bpm_rounded}")
+
+    def _on_project_changed(self):
+        """Rebuild track header panel when tracks are added or removed."""
+        # Rebuild the headers widget in-place inside the existing daw_row layout
+        old_headers = self.headers
+        self.headers = TrackHeaderPanel(self.project)
+        layout = old_headers.parentWidget().layout()
+        layout.replaceWidget(old_headers, self.headers)
+        old_headers.deleteLater()
+        # Re-wire audio header view-mode signal
+        self.headers.audio_header.view_mode_changed.connect(self.timeline.set_audio_view_mode)
+        self.headers.audio_header.bpm_grid_toggled.connect(self.timeline.set_bpm_grid_visible)
 
     # ------------------------------------------------------------------
     # File menu actions

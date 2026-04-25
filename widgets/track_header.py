@@ -1,5 +1,5 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QComboBox
-from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QComboBox, QPushButton
+from PySide6.QtCore import Qt, Signal
 
 from widgets.constants import TRACK_HEIGHT, RULER_HEIGHT, AUDIO_TRACK_HEIGHT
 
@@ -7,31 +7,76 @@ from widgets.constants import TRACK_HEIGHT, RULER_HEIGHT, AUDIO_TRACK_HEIGHT
 class AudioTrackHeader(QWidget):
     """Left-side header for the audio reference row."""
 
+    view_mode_changed = Signal(str)   # "spectrogram" | "waveform" | "both" | "none"
+    bpm_grid_toggled  = Signal(bool)
+
     def __init__(self):
         super().__init__()
         self.setFixedHeight(AUDIO_TRACK_HEIGHT)
         self.setStyleSheet("background: #151525; border-bottom: 1px solid #333;")
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(4)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(3)
 
+        # Row 1: title + filename
+        top = QHBoxLayout()
+        top.setSpacing(4)
         title = QLabel("Audio")
         title.setStyleSheet("color: #8888cc; font-weight: bold; font-size: 11px; border: none;")
-
         self._filename = QLabel("No audio")
         self._filename.setStyleSheet(
             "color: #555; font-size: 10px; border: none; font-style: italic;"
         )
-        self._filename.setWordWrap(True)
+        self._filename.setWordWrap(False)
+        top.addWidget(title)
+        top.addWidget(self._filename, stretch=1)
+        layout.addLayout(top)
 
-        layout.addWidget(title)
-        layout.addWidget(self._filename)
-        layout.addStretch()
+        # Row 2: view-mode combo + BPM label
+        mid = QHBoxLayout()
+        mid.setSpacing(4)
+        self._view_combo = QComboBox()
+        self._view_combo.addItems(["Spectrogram", "Waveform", "Both", "None"])
+        self._view_combo.setStyleSheet(
+            "QComboBox { color: #aaa; background: #222; border: 1px solid #444; "
+            "font-size: 10px; padding: 1px 4px; }"
+            "QComboBox QAbstractItemView { background: #2a2a2a; color: white; }"
+        )
+        self._view_combo.setFixedHeight(20)
+        self._bpm_label = QLabel("")
+        self._bpm_label.setStyleSheet("color: #ffcc00; font-size: 10px; border: none;")
+        mid.addWidget(self._view_combo, stretch=1)
+        mid.addWidget(self._bpm_label)
+        layout.addLayout(mid)
+
+        # Row 3: BPM grid toggle
+        bot = QHBoxLayout()
+        bot.setSpacing(4)
+        self._bpm_btn = QPushButton("BPM Grid")
+        self._bpm_btn.setCheckable(True)
+        self._bpm_btn.setStyleSheet(
+            "QPushButton { color: #aaa; background: #222; border: 1px solid #444; "
+            "border-radius: 3px; font-size: 10px; padding: 1px 6px; }"
+            "QPushButton:checked { color: #ffcc00; border-color: #ffcc00; background: #2a2200; }"
+            "QPushButton:hover { background: #2e2e2e; }"
+        )
+        self._bpm_btn.setFixedHeight(20)
+        bot.addWidget(self._bpm_btn)
+        bot.addStretch()
+        layout.addLayout(bot)
+
+        self._view_combo.currentTextChanged.connect(
+            lambda t: self.view_mode_changed.emit(t.lower())
+        )
+        self._bpm_btn.toggled.connect(self.bpm_grid_toggled)
 
     def set_filename(self, name: str):
         self._filename.setText(name)
         self._filename.setStyleSheet("color: #8888cc; font-size: 10px; border: none;")
+
+    def set_bpm(self, bpm: float):
+        self._bpm_label.setText(f"{bpm:.1f} BPM")
 
 
 class SingleTrackHeader(QWidget):
