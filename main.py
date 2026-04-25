@@ -268,8 +268,8 @@ class MainWindow(QMainWindow):
         daw_row.setContentsMargins(0, 0, 0, 0)
         daw_row.setSpacing(0)
 
-        self.headers  = TrackHeaderPanel(project)
-        self.timeline = TimelineWidget(project)
+        self.headers  = TrackHeaderPanel(self.project)
+        self.timeline = TimelineWidget(self.project)
         daw_row.addWidget(self.headers)
         daw_row.addWidget(self.timeline, stretch=1)
 
