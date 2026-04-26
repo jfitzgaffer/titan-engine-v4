@@ -1,6 +1,7 @@
 import copy
 import uuid
 
+import numpy as np
 from PySide6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsRectItem, QGraphicsItem,
     QMenu, QInputDialog, QColorDialog,
@@ -87,7 +88,10 @@ class AudioTrackItem(QGraphicsRectItem):
         self.setZValue(1)
         self.setAcceptedMouseButtons(Qt.NoButton)
         self._spec_image: QImage | None = None
-        self._wave_image: QImage | None = None
+        self._wave_image: QImage | None = None     # legacy / fallback
+        self._waveform_rms: np.ndarray | None = None   # raw RMS data (sharp rendering)
+        self._waveform_hop_sec: float = 0.01
+        self._waveform_cache: QImage | None = None     # rendered at current rect width
         self._view_mode: str = "spectrogram"
         self.setBrush(QBrush(QColor(15, 15, 30)))
         self.setPen(QPen(QColor(40, 40, 60), 1))
@@ -98,9 +102,62 @@ class AudioTrackItem(QGraphicsRectItem):
         self.update()
 
     def set_waveform_image(self, img: QImage):
+        """Legacy: store a pre-rendered QImage (used as fallback)."""
         self._wave_image = img.scaled(int(self.rect().width()), AUDIO_TRACK_HEIGHT,
                                       Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
         self.update()
+
+    def set_waveform_data(self, rms: np.ndarray, hop_sec: float = 0.01):
+        """
+        Store raw normalized RMS data for pixel-perfect procedural rendering.
+        Invalidates the cache so the next paint() re-renders at the correct width.
+        """
+        self._waveform_rms = np.asarray(rms, dtype=np.float32)
+        self._waveform_hop_sec = hop_sec
+        self._waveform_cache = None
+        self.update()
+
+    def _get_waveform_image(self) -> QImage | None:
+        """
+        Return a sharp QImage of the waveform at the item's exact pixel width.
+        Renders from raw RMS data if available; falls back to legacy _wave_image.
+        Caches the result — only re-renders when data changes or width changes.
+        """
+        if self._waveform_rms is None:
+            return self._wave_image
+
+        w = int(self.rect().width())
+        h = int(self.rect().height())
+        if w <= 0 or h <= 0:
+            return None
+
+        # Return cached image if width hasn't changed
+        if self._waveform_cache is not None and self._waveform_cache.width() == w:
+            return self._waveform_cache
+
+        rms      = self._waveform_rms
+        hop_sec  = self._waveform_hop_sec
+        n        = len(rms)
+        mid      = h // 2
+
+        # Map each pixel column to the nearest RMS sample
+        px_per_sample = max(hop_sec * PIXELS_PER_SECOND, 1e-6)
+        xs            = np.arange(w, dtype=np.float32)
+        sample_idx    = (xs / px_per_sample).astype(np.int32)
+        in_range      = sample_idx < n
+        vals          = np.where(in_range, rms[np.clip(sample_idx, 0, n - 1)], 0.0)
+        halves        = np.clip((vals * mid * 0.92).astype(np.int32), 0, mid)
+
+        img_arr = np.zeros((h, w, 3), dtype=np.uint8)
+        ys  = np.arange(h)[:, np.newaxis]       # (h, 1)
+        y0s = (mid - halves)[np.newaxis, :]     # (1, w)
+        y1s = (mid + halves + 1)[np.newaxis, :] # (1, w)
+        mask = (ys >= y0s) & (ys <= y1s)        # (h, w)
+        img_arr[mask] = [0, 210, 110]
+
+        img = QImage(img_arr.tobytes(), w, h, w * 3, QImage.Format_RGB888)
+        self._waveform_cache = img.copy()
+        return self._waveform_cache
 
     def set_image(self, img: QImage):   # backward-compat
         self.set_spectrogram_image(img)
@@ -112,17 +169,18 @@ class AudioTrackItem(QGraphicsRectItem):
     def paint(self, painter, option, widget):
         super().paint(painter, option, widget)
         r, mode = self.rect(), self._view_mode
+        wave_img = self._get_waveform_image()
         if mode == "spectrogram":
             if self._spec_image: painter.drawImage(r, self._spec_image)
             else: self._placeholder(painter, r)
         elif mode == "waveform":
-            if self._wave_image: painter.drawImage(r, self._wave_image)
+            if wave_img: painter.drawImage(r, wave_img)
             else: self._placeholder(painter, r)
         elif mode == "both":
             if self._spec_image: painter.drawImage(r, self._spec_image)
-            if self._wave_image:
+            if wave_img:
                 painter.setOpacity(0.65)
-                painter.drawImage(r, self._wave_image)
+                painter.drawImage(r, wave_img)
                 painter.setOpacity(1.0)
         # "none": dark background only
 
@@ -497,6 +555,9 @@ class TimelineWidget(QGraphicsView):
 
     def set_waveform_image(self, img):
         if self._audio_item: self._audio_item.set_waveform_image(img)
+
+    def set_waveform_data(self, rms, hop_sec: float = 0.01):
+        if self._audio_item: self._audio_item.set_waveform_data(rms, hop_sec)
 
     def set_audio_view_mode(self, mode: str):
         if self._audio_item: self._audio_item.set_view_mode(mode)

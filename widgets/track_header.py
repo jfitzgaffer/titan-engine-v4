@@ -1,14 +1,31 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QComboBox, QPushButton
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QSlider, QComboBox, QPushButton, QDoubleSpinBox,
+)
 from PySide6.QtCore import Qt, Signal
 
 from widgets.constants import TRACK_HEIGHT, RULER_HEIGHT, AUDIO_TRACK_HEIGHT
 
 
+# Frequency-band presets: label → (lo_hz, hi_hz)
+_BAND_PRESETS = {
+    "Full Range":   (0.0,    22050.0),
+    "Sub Bass":     (20.0,   80.0),
+    "Bass":         (80.0,   300.0),
+    "Low Mids":     (300.0,  1000.0),
+    "High Mids":    (1000.0, 3000.0),
+    "Presence":     (3000.0, 8000.0),
+    "Highs":        (8000.0, 20000.0),
+    "Custom":       None,
+}
+
+
 class AudioTrackHeader(QWidget):
     """Left-side header for the audio reference row."""
 
-    view_mode_changed = Signal(str)   # "spectrogram" | "waveform" | "both" | "none"
+    view_mode_changed = Signal(str)          # "spectrogram" | "waveform" | "both" | "none"
     bpm_grid_toggled  = Signal(bool)
+    band_changed      = Signal(float, float) # (lo_hz, hi_hz) — waveform frequency filter
 
     def __init__(self):
         super().__init__()
@@ -16,24 +33,24 @@ class AudioTrackHeader(QWidget):
         self.setStyleSheet("background: #151525; border-bottom: 1px solid #333;")
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(3)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(2)
 
-        # Row 1: title + filename
+        _lbl = "color: #aaa; font-size: 10px; border: none;"
+
+        # ── Row 1: title + filename ───────────────────────────────────
         top = QHBoxLayout()
         top.setSpacing(4)
         title = QLabel("Audio")
         title.setStyleSheet("color: #8888cc; font-weight: bold; font-size: 11px; border: none;")
         self._filename = QLabel("No audio")
-        self._filename.setStyleSheet(
-            "color: #555; font-size: 10px; border: none; font-style: italic;"
-        )
+        self._filename.setStyleSheet("color: #555; font-size: 10px; border: none; font-style: italic;")
         self._filename.setWordWrap(False)
         top.addWidget(title)
         top.addWidget(self._filename, stretch=1)
         layout.addLayout(top)
 
-        # Row 2: view-mode combo + BPM label
+        # ── Row 2: view-mode combo + BPM label ───────────────────────
         mid = QHBoxLayout()
         mid.setSpacing(4)
         self._view_combo = QComboBox()
@@ -50,7 +67,7 @@ class AudioTrackHeader(QWidget):
         mid.addWidget(self._bpm_label)
         layout.addLayout(mid)
 
-        # Row 3: BPM grid toggle
+        # ── Row 3: BPM grid toggle ────────────────────────────────────
         bot = QHBoxLayout()
         bot.setSpacing(4)
         self._bpm_btn = QPushButton("BPM Grid")
@@ -66,10 +83,67 @@ class AudioTrackHeader(QWidget):
         bot.addStretch()
         layout.addLayout(bot)
 
+        # ── Row 4: waveform frequency-band filter ─────────────────────
+        band_row = QHBoxLayout()
+        band_row.setSpacing(4)
+
+        band_lbl = QLabel("Band:")
+        band_lbl.setStyleSheet(_lbl)
+        band_lbl.setFixedWidth(28)
+
+        self._band_combo = QComboBox()
+        self._band_combo.addItems(list(_BAND_PRESETS.keys()))
+        self._band_combo.setStyleSheet(
+            "QComboBox { color: #aaa; background: #222; border: 1px solid #444; "
+            "font-size: 10px; padding: 1px 4px; }"
+            "QComboBox QAbstractItemView { background: #2a2a2a; color: white; }"
+        )
+        self._band_combo.setFixedHeight(20)
+
+        spin_ss = (
+            "QDoubleSpinBox { color: #aaa; background: #222; border: 1px solid #444; "
+            "font-size: 10px; padding: 1px 2px; }"
+        )
+        self._lo_spin = QDoubleSpinBox()
+        self._lo_spin.setRange(0, 22050)
+        self._lo_spin.setValue(0)
+        self._lo_spin.setSuffix(" Hz")
+        self._lo_spin.setDecimals(0)
+        self._lo_spin.setFixedHeight(20)
+        self._lo_spin.setFixedWidth(68)
+        self._lo_spin.setStyleSheet(spin_ss)
+
+        self._hi_spin = QDoubleSpinBox()
+        self._hi_spin.setRange(0, 22050)
+        self._hi_spin.setValue(22050)
+        self._hi_spin.setSuffix(" Hz")
+        self._hi_spin.setDecimals(0)
+        self._hi_spin.setFixedHeight(20)
+        self._hi_spin.setFixedWidth(68)
+        self._hi_spin.setStyleSheet(spin_ss)
+
+        dash = QLabel("–")
+        dash.setStyleSheet(_lbl)
+
+        band_row.addWidget(band_lbl)
+        band_row.addWidget(self._band_combo, stretch=1)
+        band_row.addWidget(self._lo_spin)
+        band_row.addWidget(dash)
+        band_row.addWidget(self._hi_spin)
+        layout.addLayout(band_row)
+
+        # ── Signal wiring ─────────────────────────────────────────────
         self._view_combo.currentTextChanged.connect(
             lambda t: self.view_mode_changed.emit(t.lower())
         )
         self._bpm_btn.toggled.connect(self.bpm_grid_toggled)
+        self._band_combo.currentTextChanged.connect(self._on_band_preset)
+        self._lo_spin.valueChanged.connect(self._on_custom_band)
+        self._hi_spin.valueChanged.connect(self._on_custom_band)
+
+        self._update_spin_state("Full Range")
+
+    # ── Public API ────────────────────────────────────────────────────
 
     def set_filename(self, name: str):
         self._filename.setText(name)
@@ -77,6 +151,40 @@ class AudioTrackHeader(QWidget):
 
     def set_bpm(self, bpm: float):
         self._bpm_label.setText(f"{bpm:.1f} BPM")
+
+    # ── Internal ──────────────────────────────────────────────────────
+
+    def _on_band_preset(self, text: str):
+        self._update_spin_state(text)
+        preset = _BAND_PRESETS.get(text)
+        if preset is not None:
+            lo, hi = preset
+            self._lo_spin.blockSignals(True)
+            self._hi_spin.blockSignals(True)
+            self._lo_spin.setValue(lo)
+            self._hi_spin.setValue(hi)
+            self._lo_spin.blockSignals(False)
+            self._hi_spin.blockSignals(False)
+            self.band_changed.emit(lo, hi)
+
+    def _on_custom_band(self):
+        if self._band_combo.currentText() == "Custom":
+            lo = self._lo_spin.value()
+            hi = self._hi_spin.value()
+            if hi > lo:
+                self.band_changed.emit(lo, hi)
+
+    def _update_spin_state(self, preset_name: str):
+        custom = (preset_name == "Custom")
+        self._lo_spin.setEnabled(custom)
+        self._hi_spin.setEnabled(custom)
+        alpha = "color: #aaa;" if custom else "color: #666;"
+        ss = (
+            f"QDoubleSpinBox {{ {alpha} background: #222; border: 1px solid #444; "
+            "font-size: 10px; padding: 1px 2px; }"
+        )
+        self._lo_spin.setStyleSheet(ss)
+        self._hi_spin.setStyleSheet(ss)
 
 
 class SingleTrackHeader(QWidget):

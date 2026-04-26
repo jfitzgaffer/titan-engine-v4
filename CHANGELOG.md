@@ -1,5 +1,23 @@
 # Changelog
 
+## [2026-04-25] - Sharp waveform rendering + frequency band filter
+
+### Added
+- `widgets/track_header.py` — "Band" row in `AudioTrackHeader` with presets: Full Range / Sub Bass / Bass / Low Mids / High Mids / Presence / Highs / Custom; Custom mode enables lo/hi Hz spinboxes; emits `band_changed(lo_hz, hi_hz)` signal
+- `main.py` — `FilteredWaveformWorker(QThread)`: recomputes waveform with STFT bandpass from cached mono audio; no file re-read or spectrogram re-analysis
+- `main.py` — `AudioAnalysisWorker._waveform_static()`: shared static method for both full-analysis and filtered-waveform workers
+- `main.py` — `_on_audio_data_ready(mono, sr)`: caches raw mono array for band re-filtering
+- `main.py` — `_on_band_changed(lo, hi)`: stops any running waveform worker, starts `FilteredWaveformWorker` with new band
+- `main.py` — `audio_data_ready = Signal(object, int)` on `AudioAnalysisWorker`
+
+### Changed
+- `widgets/constants.py` — `AUDIO_TRACK_HEIGHT: 80 → 110` to accommodate the new band filter row
+- `widgets/timeline.py` — `AudioTrackItem` now stores raw RMS float32 array (`_waveform_rms`) instead of a pre-scaled QImage; `_get_waveform_image()` renders a sharp QImage at the exact item pixel width using fully vectorized numpy; cache is invalidated only when data changes or width changes; result is always 1-to-1 with scene pixels — no upscale blur
+- `main.py` — `AudioAnalysisWorker.waveform_ready` now emits `(rms_ndarray, hop_sec)` instead of a `QImage`; hop resolution increased to sr/200 (~200 frames/sec) from a fixed pixel bucket
+- `main.py` — `_waveform()` now uses STFT-based bandpass for non-full-range bands; fast bucket RMS path retained for "Full Range" mode
+- `_on_project_changed` re-wires `band_changed` on the new headers widget
+- `closeEvent` stops `_waveform_worker` as well as `_analysis_worker`
+
 ## [2026-04-24] - MP3 support, audio crash fix, markers, snap, compound clips, dynamic timeline
 
 ### Added

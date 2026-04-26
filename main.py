@@ -56,16 +56,16 @@ class AudioAnalysisWorker(QThread):
     Background audio analysis: spectrogram, waveform, BPM, and duration.
     Uses load_audio_any so MP3 files are supported.
     """
-    spectrogram_ready = Signal(object)   # QImage
-    waveform_ready    = Signal(object)   # QImage
+    spectrogram_ready = Signal(object)        # QImage
+    waveform_ready    = Signal(object, float) # (rms_ndarray, hop_sec)
+    audio_data_ready  = Signal(object, int)   # (mono_ndarray, sample_rate) — for re-filtering
     bpm_ready         = Signal(float)
-    tempo_map_ready   = Signal(object)   # list[(time_sec, bpm)]
-    duration_ready    = Signal(float)    # total audio length in seconds
+    tempo_map_ready   = Signal(object)        # list[(time_sec, bpm)]
+    duration_ready    = Signal(float)         # total audio length in seconds
 
-    def __init__(self, audio_path: str, target_width: int = 4000, target_height: int = 80):
+    def __init__(self, audio_path: str, target_height: int = 80):
         super().__init__()
         self._path = audio_path
-        self._w = target_width
         self._h = target_height
 
     def run(self):
@@ -78,16 +78,17 @@ class AudioAnalysisWorker(QThread):
         try:
             duration_secs = len(data) / sr
             self.duration_ready.emit(duration_secs)
+            self.audio_data_ready.emit(mono, sr)
 
-            spec_img  = self._spectrogram(mono, sr)
-            wave_img  = self._waveform(mono)
-            tempo_map = self._build_tempo_map(mono, sr)
-            bpm       = tempo_map[0][1] if tempo_map else self._detect_bpm(mono, sr)
+            spec_img          = self._spectrogram(mono, sr)
+            rms, hop_sec      = self._waveform(mono, sr)
+            tempo_map         = self._build_tempo_map(mono, sr)
+            bpm               = tempo_map[0][1] if tempo_map else self._detect_bpm(mono, sr)
 
-            if spec_img:  self.spectrogram_ready.emit(spec_img)
-            if wave_img:  self.waveform_ready.emit(wave_img)
-            if tempo_map: self.tempo_map_ready.emit(tempo_map)
-            if bpm > 0:   self.bpm_ready.emit(bpm)
+            if spec_img:          self.spectrogram_ready.emit(spec_img)
+            if rms is not None:   self.waveform_ready.emit(rms, hop_sec)
+            if tempo_map:         self.tempo_map_ready.emit(tempo_map)
+            if bpm > 0:           self.bpm_ready.emit(bpm)
         except Exception as e:
             logger.warning(f"Audio analysis failed: {e}")
 
@@ -125,29 +126,41 @@ class AudioAnalysisWorker(QThread):
 
     # ---- waveform ---------------------------------------------------
 
-    def _waveform(self, mono) -> QImage | None:
-        bucket = max(1, len(mono) // self._w)
-        n = (len(mono) // bucket) * bucket
-        rms = np.sqrt(np.mean(
-            mono[:n].reshape(-1, bucket) ** 2, axis=1
-        ))
-        xs = np.linspace(0, len(rms) - 1, self._w)
-        rms = rms[xs.astype(int)]
+    @staticmethod
+    def _waveform_static(mono, sr,
+                         lo_hz: float = 0.0, hi_hz: float = 22050.0):
+        """Static entry point so FilteredWaveformWorker can reuse this logic."""
+        hop     = max(256, sr // 200)
+        hop_sec = hop / sr
+        n_frames = len(mono) // hop
+        if n_frames < 2:
+            return None, hop_sec
+        if lo_hz <= 0.0 and hi_hz >= sr / 2:
+            n = n_frames * hop
+            rms = np.sqrt(np.mean(
+                mono[:n].reshape(n_frames, hop) ** 2, axis=1
+            )).astype(np.float32)
+        else:
+            n_fft  = 2048
+            window = np.hanning(n_fft).astype(np.float32)
+            freqs  = np.fft.rfftfreq(n_fft, d=1.0 / sr)
+            band_mask = (freqs >= lo_hz) & (freqs <= hi_hz)
+            rms = np.zeros(n_frames, dtype=np.float32)
+            for i in range(n_frames):
+                chunk = mono[i * hop: i * hop + n_fft]
+                if len(chunk) < n_fft:
+                    chunk = np.pad(chunk, (0, n_fft - len(chunk)))
+                spec = np.abs(np.fft.rfft(chunk * window))
+                if band_mask.any():
+                    rms[i] = np.sqrt(np.mean(spec[band_mask] ** 2))
         peak = rms.max()
         if peak > 0:
             rms /= peak
+        return rms, hop_sec
 
-        img_arr = np.zeros((self._h, self._w, 3), dtype=np.uint8)
-        mid = self._h // 2
-        for x in range(self._w):
-            half = int(rms[x] * mid)
-            y0 = max(0, mid - half)
-            y1 = min(self._h, mid + half + 1)
-            img_arr[y0:y1, x] = [0, 180, 100]
-
-        img = QImage(img_arr.tobytes(), self._w, self._h,
-                     self._w * 3, QImage.Format_RGB888)
-        return img.copy()
+    def _waveform(self, mono, sr,
+                  lo_hz: float = 0.0, hi_hz: float = 22050.0):
+        return AudioAnalysisWorker._waveform_static(mono, sr, lo_hz, hi_hz)
 
     # ---- BPM detection (autocorrelation on onset envelope) ----------
 
@@ -207,6 +220,34 @@ class AudioAnalysisWorker(QThread):
 
 
 # ------------------------------------------------------------------
+# Lightweight worker: re-render waveform with a new frequency band
+# ------------------------------------------------------------------
+class FilteredWaveformWorker(QThread):
+    """
+    Recomputes only the waveform envelope with a different frequency band.
+    Reuses cached raw mono audio — no file I/O or spectrogram re-analysis.
+    """
+    waveform_ready = Signal(object, float)   # (rms_ndarray, hop_sec)
+
+    def __init__(self, mono: np.ndarray, sr: int, lo_hz: float, hi_hz: float):
+        super().__init__()
+        self._mono  = mono
+        self._sr    = sr
+        self._lo    = lo_hz
+        self._hi    = hi_hz
+
+    def run(self):
+        try:
+            rms, hop_sec = AudioAnalysisWorker._waveform_static(
+                self._mono, self._sr, self._lo, self._hi
+            )
+            if rms is not None:
+                self.waveform_ready.emit(rms, hop_sec)
+        except Exception as e:
+            logger.warning(f"Filtered waveform failed: {e}")
+
+
+# ------------------------------------------------------------------
 # Demo project
 # ------------------------------------------------------------------
 def build_demo_project() -> tuple:
@@ -263,6 +304,9 @@ class MainWindow(QMainWindow):
 
         self._save_path: str | None = None
         self._analysis_worker: AudioAnalysisWorker | None = None
+        self._waveform_worker: FilteredWaveformWorker | None = None
+        self._audio_mono: np.ndarray | None = None
+        self._audio_sr: int = 44100
         self._selected_clip = None
 
         # Pipeline
@@ -382,6 +426,7 @@ class MainWindow(QMainWindow):
         self.properties.clip_layout_changed.connect(self._render_current_frame)
         self.headers.audio_header.view_mode_changed.connect(self.timeline.set_audio_view_mode)
         self.headers.audio_header.bpm_grid_toggled.connect(self.timeline.set_bpm_grid_visible)
+        self.headers.audio_header.band_changed.connect(self._on_band_changed)
 
         # Global shortcuts (work regardless of which widget has focus)
         for key, slot in [
@@ -483,18 +528,46 @@ class MainWindow(QMainWindow):
         self._stop_analysis_worker()
 
         # Start fresh analysis
-        self._analysis_worker = AudioAnalysisWorker(dest_str, target_width=4000, target_height=80)
+        self._analysis_worker = AudioAnalysisWorker(dest_str, target_height=80)
         self._analysis_worker.spectrogram_ready.connect(self.timeline.set_spectrogram_image)
-        self._analysis_worker.waveform_ready.connect(self.timeline.set_waveform_image)
+        self._analysis_worker.waveform_ready.connect(self.timeline.set_waveform_data)
+        self._analysis_worker.audio_data_ready.connect(self._on_audio_data_ready)
         self._analysis_worker.bpm_ready.connect(self._on_bpm_detected)
         self._analysis_worker.tempo_map_ready.connect(self.timeline.set_tempo_map)
         self._analysis_worker.duration_ready.connect(self._on_audio_duration)
         self._analysis_worker.start()
         logger.info(f"Audio analysis started for {src.name}")
 
+    def _on_audio_data_ready(self, mono: np.ndarray, sr: int):
+        """Cache raw mono audio for fast band-filter re-renders."""
+        self._audio_mono = mono
+        self._audio_sr   = sr
+
     def _on_audio_duration(self, seconds: float):
         self.timeline.set_scene_duration(seconds)
         logger.info(f"Audio duration: {seconds:.1f}s — timeline extended")
+
+    def _on_band_changed(self, lo_hz: float, hi_hz: float):
+        """Recompute waveform for the selected frequency band (non-blocking)."""
+        if self._audio_mono is None:
+            return
+        self._stop_waveform_worker()
+        self._waveform_worker = FilteredWaveformWorker(
+            self._audio_mono, self._audio_sr, lo_hz, hi_hz
+        )
+        self._waveform_worker.waveform_ready.connect(self.timeline.set_waveform_data)
+        self._waveform_worker.start()
+        logger.info(f"Waveform filter: {lo_hz:.0f}–{hi_hz:.0f} Hz")
+
+    def _stop_waveform_worker(self):
+        if not self._waveform_worker:
+            return
+        if self._waveform_worker.isRunning():
+            self._waveform_worker.quit()
+            if not self._waveform_worker.wait(1000):
+                self._waveform_worker.terminate()
+                self._waveform_worker.wait(300)
+        self._waveform_worker = None
 
     def _on_bpm_detected(self, bpm: float):
         bpm_rounded = round(bpm, 1)
@@ -511,6 +584,7 @@ class MainWindow(QMainWindow):
         old_headers.deleteLater()
         self.headers.audio_header.view_mode_changed.connect(self.timeline.set_audio_view_mode)
         self.headers.audio_header.bpm_grid_toggled.connect(self.timeline.set_bpm_grid_visible)
+        self.headers.audio_header.band_changed.connect(self._on_band_changed)
 
     def _stop_analysis_worker(self):
         """Gracefully stop any running analysis worker."""
@@ -611,6 +685,7 @@ class MainWindow(QMainWindow):
         self.controller.stop()
         self.output_manager.close()
         self._stop_analysis_worker()
+        self._stop_waveform_worker()
         logger.info("Shutdown complete")
         super().closeEvent(event)
 
