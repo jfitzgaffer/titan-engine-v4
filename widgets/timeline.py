@@ -87,80 +87,95 @@ class AudioTrackItem(QGraphicsRectItem):
         self.setPos(0, RULER_HEIGHT)
         self.setZValue(1)
         self.setAcceptedMouseButtons(Qt.NoButton)
-        self._spec_image: QImage | None = None
-        self._wave_image: QImage | None = None     # legacy / fallback
-        self._waveform_rms: np.ndarray | None = None   # raw RMS data (sharp rendering)
+        # Spectrogram: store raw (h, w, 3) uint8 array for zoom-aware re-render
+        self._spec_data: np.ndarray | None = None
+        self._spec_cache: QImage | None = None
+        self._spec_cache_w: int = 0
+        # Waveform: store raw RMS float32 array for zoom-aware re-render
+        self._waveform_rms: np.ndarray | None = None
         self._waveform_hop_sec: float = 0.01
-        self._waveform_cache: QImage | None = None     # rendered at current rect width
+        self._waveform_cache: QImage | None = None
+        self._waveform_cache_w: int = 0
         self._view_mode: str = "spectrogram"
         self.setBrush(QBrush(QColor(15, 15, 30)))
         self.setPen(QPen(QColor(40, 40, 60), 1))
 
-    def set_spectrogram_image(self, img: QImage):
-        self._spec_image = img.scaled(int(self.rect().width()), AUDIO_TRACK_HEIGHT,
-                                      Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    def set_spectrogram_data(self, rgb: np.ndarray):
+        """Store raw colorized RGB array (h, w, 3) for zoom-aware rendering."""
+        self._spec_data = np.asarray(rgb, dtype=np.uint8)
+        self._spec_cache = None
+        self._spec_cache_w = 0
         self.update()
+
+    def set_spectrogram_image(self, img: QImage):
+        """Legacy entry point — kept for backward compatibility."""
+        pass  # superseded by set_spectrogram_data
 
     def set_waveform_image(self, img: QImage):
-        """Legacy: store a pre-rendered QImage (used as fallback)."""
-        self._wave_image = img.scaled(int(self.rect().width()), AUDIO_TRACK_HEIGHT,
-                                      Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-        self.update()
+        """Legacy entry point — kept for backward compatibility."""
+        pass
 
     def set_waveform_data(self, rms: np.ndarray, hop_sec: float = 0.01):
-        """
-        Store raw normalized RMS data for pixel-perfect procedural rendering.
-        Invalidates the cache so the next paint() re-renders at the correct width.
-        """
+        """Store raw RMS data. Cache is invalidated so next paint() re-renders."""
         self._waveform_rms = np.asarray(rms, dtype=np.float32)
         self._waveform_hop_sec = hop_sec
         self._waveform_cache = None
+        self._waveform_cache_w = 0
         self.update()
 
-    def _get_waveform_image(self) -> QImage | None:
-        """
-        Return a sharp QImage of the waveform at the item's exact pixel width.
-        Renders from raw RMS data if available; falls back to legacy _wave_image.
-        Caches the result — only re-renders when data changes or width changes.
-        """
-        if self._waveform_rms is None:
-            return self._wave_image
-
-        w = int(self.rect().width())
-        h = int(self.rect().height())
-        if w <= 0 or h <= 0:
+    def _get_spectrogram_image(self, zoom_x: float = 1.0) -> QImage | None:
+        """Return a crisp QImage of the spectrogram at the device pixel width."""
+        if self._spec_data is None:
             return None
+        target_w = max(1, int(self.rect().width() * abs(zoom_x)))
+        target_h = max(1, int(self.rect().height()))
+        if (self._spec_cache is not None
+                and abs(self._spec_cache_w - target_w) <= max(1, target_w // 50)):
+            return self._spec_cache
+        src_h, src_w = self._spec_data.shape[:2]
+        col_idx = np.round(np.linspace(0, src_w - 1, target_w)).astype(np.int32)
+        row_idx = np.round(np.linspace(0, src_h - 1, target_h)).astype(np.int32)
+        resampled = self._spec_data[row_idx[:, np.newaxis], col_idx[np.newaxis, :], :]
+        img = QImage(resampled.tobytes(), target_w, target_h,
+                     target_w * 3, QImage.Format_RGB888)
+        self._spec_cache = img.copy()
+        self._spec_cache_w = target_w
+        return self._spec_cache
 
-        # Return cached image if width hasn't changed
-        if self._waveform_cache is not None and self._waveform_cache.width() == w:
+    def _get_waveform_image(self, zoom_x: float = 1.0) -> QImage | None:
+        """Return a crisp QImage of the waveform at the device pixel width."""
+        if self._waveform_rms is None:
+            return None
+        target_w = max(1, int(self.rect().width() * abs(zoom_x)))
+        h = max(1, int(self.rect().height()))
+        if (self._waveform_cache is not None
+                and abs(self._waveform_cache_w - target_w) <= max(1, target_w // 50)):
             return self._waveform_cache
-
-        rms      = self._waveform_rms
-        hop_sec  = self._waveform_hop_sec
-        n        = len(rms)
-        mid      = h // 2
-
-        # Map each pixel column to the nearest RMS sample
-        px_per_sample = max(hop_sec * PIXELS_PER_SECOND, 1e-6)
-        xs            = np.arange(w, dtype=np.float32)
-        sample_idx    = (xs / px_per_sample).astype(np.int32)
-        in_range      = sample_idx < n
-        vals          = np.where(in_range, rms[np.clip(sample_idx, 0, n - 1)], 0.0)
-        halves        = np.clip((vals * mid * 0.92).astype(np.int32), 0, mid)
-
-        img_arr = np.zeros((h, w, 3), dtype=np.uint8)
-        ys  = np.arange(h)[:, np.newaxis]       # (h, 1)
-        y0s = (mid - halves)[np.newaxis, :]     # (1, w)
-        y1s = (mid + halves + 1)[np.newaxis, :] # (1, w)
-        mask = (ys >= y0s) & (ys <= y1s)        # (h, w)
-        img_arr[mask] = [0, 210, 110]
-
-        img = QImage(img_arr.tobytes(), w, h, w * 3, QImage.Format_RGB888)
+        rms     = self._waveform_rms
+        hop_sec = self._waveform_hop_sec
+        n       = len(rms)
+        mid     = h // 2
+        # Each device pixel column maps to the nearest RMS sample
+        # scene_w * zoom_x = target_w, so pixel i maps to scene pos i/zoom_x
+        # which in seconds is (i / zoom_x) / PIXELS_PER_SECOND
+        px_per_sample = max(hop_sec * PIXELS_PER_SECOND * abs(zoom_x), 1e-6)
+        xs         = np.arange(target_w, dtype=np.float32)
+        sample_idx = (xs / px_per_sample).astype(np.int32)
+        in_range   = sample_idx < n
+        vals       = np.where(in_range, rms[np.clip(sample_idx, 0, n - 1)], 0.0)
+        halves     = np.clip((vals * mid * 0.92).astype(np.int32), 0, mid)
+        img_arr = np.zeros((h, target_w, 3), dtype=np.uint8)
+        ys  = np.arange(h)[:, np.newaxis]
+        y0s = (mid - halves)[np.newaxis, :]
+        y1s = (mid + halves + 1)[np.newaxis, :]
+        img_arr[(ys >= y0s) & (ys <= y1s)] = [0, 210, 110]
+        img = QImage(img_arr.tobytes(), target_w, h, target_w * 3, QImage.Format_RGB888)
         self._waveform_cache = img.copy()
+        self._waveform_cache_w = target_w
         return self._waveform_cache
 
     def set_image(self, img: QImage):   # backward-compat
-        self.set_spectrogram_image(img)
+        pass  # superseded
 
     def set_view_mode(self, mode: str):
         self._view_mode = mode
@@ -168,16 +183,18 @@ class AudioTrackItem(QGraphicsRectItem):
 
     def paint(self, painter, option, widget):
         super().paint(painter, option, widget)
-        r, mode = self.rect(), self._view_mode
-        wave_img = self._get_waveform_image()
+        zoom_x   = abs(painter.worldTransform().m11()) or 1.0
+        r, mode  = self.rect(), self._view_mode
+        spec_img = self._get_spectrogram_image(zoom_x)
+        wave_img = self._get_waveform_image(zoom_x)
         if mode == "spectrogram":
-            if self._spec_image: painter.drawImage(r, self._spec_image)
+            if spec_img: painter.drawImage(r, spec_img)
             else: self._placeholder(painter, r)
         elif mode == "waveform":
             if wave_img: painter.drawImage(r, wave_img)
             else: self._placeholder(painter, r)
         elif mode == "both":
-            if self._spec_image: painter.drawImage(r, self._spec_image)
+            if spec_img: painter.drawImage(r, spec_img)
             if wave_img:
                 painter.setOpacity(0.65)
                 painter.drawImage(r, wave_img)
@@ -247,29 +264,34 @@ class MarkerItem(QGraphicsItem):
                 self._on_changed(self)
         return super().itemChange(change, value)
 
-    def contextMenuEvent(self, event):
-        menu = QMenu()
+    def _show_context_menu(self, parent_widget=None):
+        """Show rename/recolor/delete menu.  Called from view to get a proper parent."""
+        menu = QMenu(parent_widget)
         menu.setStyleSheet(_MENU_SS)
-        rename_act  = menu.addAction("Rename…")
-        color_act   = menu.addAction("Change Color…")
+        rename_act = menu.addAction("Rename…")
+        color_act  = menu.addAction("Change Color…")
         menu.addSeparator()
-        delete_act  = menu.addAction("Delete Marker")
+        delete_act = menu.addAction("Delete Marker")
         chosen = menu.exec(QCursor.pos())
         if chosen == rename_act:
-            text, ok = QInputDialog.getText(None, "Rename Marker", "Name:", text=self.name)
+            text, ok = QInputDialog.getText(
+                parent_widget, "Rename Marker", "Name:", text=self.name)
             if ok:
                 self.name = text
                 self.update()
                 if self._on_changed: self._on_changed(self)
         elif chosen == color_act:
-            c = QColorDialog.getColor(self.color, None, "Marker Color")
+            c = QColorDialog.getColor(self.color, parent_widget, "Marker Color")
             if c.isValid():
                 self.color = c
                 self.update()
                 if self._on_changed: self._on_changed(self)
         elif chosen == delete_act:
             if self._on_delete: self._on_delete(self)
-        event.accept()
+
+    def contextMenuEvent(self, event):
+        # Handled at view level so we have a proper Qt parent widget for dialogs.
+        event.ignore()
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -492,6 +514,29 @@ class TimelineWidget(QGraphicsView):
 
     # ── scene build ───────────────────────────────────────────────────
 
+    def _draw_group_border(self, gid: str, items: list):
+        """Draw a colored bounding-box border around a group's ClipItems."""
+        if not items:
+            return
+        pad   = 4
+        min_x = min(i.pos().x() for i in items) - pad
+        max_x = max(i.pos().x() + i.rect().width()  for i in items) + pad
+        min_y = min(i.pos().y() for i in items) - pad
+        max_y = max(i.pos().y() + i.rect().height() for i in items) + pad
+        base  = _group_color(gid)
+        fill  = QColor(base.red(), base.green(), base.blue(), 18)
+        stroke = QColor(base.red(), base.green(), base.blue(), 180)
+        depth = self._group_depth(gid)
+        pen   = QPen(stroke, 2.0 if depth == 0 else 1.5)
+        pen.setStyle(Qt.SolidLine if depth == 0
+                     else Qt.DashLine if depth == 1
+                     else Qt.DotLine)
+        border = QGraphicsRectItem(min_x, min_y, max_x - min_x, max_y - min_y)
+        border.setPen(pen)
+        border.setBrush(QBrush(fill))
+        border.setZValue(1.0 + depth * 0.3)
+        self.scene.addItem(border)
+
     def _populate_scene(self):
         self.scene.clear()
         self._audio_item = None
@@ -503,6 +548,8 @@ class TimelineWidget(QGraphicsView):
         self.scene.addItem(self._audio_item)
 
         y = _LANES_Y
+        clip_items_by_group: dict[str, list] = {}
+
         for track_idx, track in enumerate(self.project.tracks):
             bg = QGraphicsRectItem(0, y, self.SCENE_WIDTH, TRACK_HEIGHT)
             bg.setBrush(QBrush(QColor(40, 40, 40) if track_idx % 2 == 0
@@ -511,12 +558,20 @@ class TimelineWidget(QGraphicsView):
             self.scene.addItem(bg)
             for subtrack in track.sub_tracks:
                 for clip in subtrack.clips:
-                    self.scene.addItem(ClipItem(
+                    ci = ClipItem(
                         clip, y, track_idx,
                         on_selected=lambda c: self.clip_selected.emit(c),
                         timeline=self,
-                    ))
+                    )
+                    ci.setZValue(2)
+                    self.scene.addItem(ci)
+                    if clip.group_id:
+                        clip_items_by_group.setdefault(clip.group_id, []).append(ci)
             y += TRACK_HEIGHT
+
+        # Group borders (behind clips at Z ≤ 1.9)
+        for gid, gitems in clip_items_by_group.items():
+            self._draw_group_border(gid, gitems)
 
         total_h = max(y, _LANES_Y + TRACK_HEIGHT)
         self.scene.setSceneRect(0, 0, self.SCENE_WIDTH, total_h)
@@ -533,15 +588,24 @@ class TimelineWidget(QGraphicsView):
             self._rebuild_bpm_grid()
 
     def refresh(self):
-        spec  = self._audio_item._spec_image if self._audio_item else None
-        wave  = self._audio_item._wave_image if self._audio_item else None
-        vmode = self._audio_item._view_mode  if self._audio_item else "spectrogram"
-        ph    = self.playhead_line.pos().x() if self.playhead_line else 0.0
+        ai = self._audio_item
+        spec_data    = ai._spec_data        if ai else None
+        spec_cache   = ai._spec_cache       if ai else None
+        spec_cache_w = ai._spec_cache_w     if ai else 0
+        rms          = ai._waveform_rms     if ai else None
+        hop          = ai._waveform_hop_sec if ai else 0.01
+        vmode        = ai._view_mode        if ai else "spectrogram"
+        ph           = self.playhead_line.pos().x() if self.playhead_line else 0.0
         self._populate_scene()
         if self._audio_item:
-            self._audio_item._spec_image = spec
-            self._audio_item._wave_image = wave
-            self._audio_item._view_mode  = vmode
+            if spec_data is not None:
+                self._audio_item._spec_data    = spec_data
+                self._audio_item._spec_cache   = spec_cache
+                self._audio_item._spec_cache_w = spec_cache_w
+            if rms is not None:
+                self._audio_item._waveform_rms     = rms
+                self._audio_item._waveform_hop_sec = hop
+            self._audio_item._view_mode = vmode
         if self.playhead_line:
             self.playhead_line.setPos(ph, 0)
 
@@ -558,6 +622,9 @@ class TimelineWidget(QGraphicsView):
 
     def set_waveform_data(self, rms, hop_sec: float = 0.01):
         if self._audio_item: self._audio_item.set_waveform_data(rms, hop_sec)
+
+    def set_spectrogram_data(self, rgb):
+        if self._audio_item: self._audio_item.set_spectrogram_data(rgb)
 
     def set_audio_view_mode(self, mode: str):
         if self._audio_item: self._audio_item.set_view_mode(mode)
@@ -671,7 +738,7 @@ class TimelineWidget(QGraphicsView):
 
     # ── markers ──────────────────────────────────────────────────────
 
-    def add_marker(self, time_sec: float, name: str = "Marker",
+    def add_marker(self, time_sec: float, name: str = "",
                    color: QColor = None):
         """Add a marker at time_sec and sync to project.markers."""
         if color is None:
@@ -801,7 +868,7 @@ class TimelineWidget(QGraphicsView):
                     return
 
     def _duplicate_selected(self):
-        """Duplicate all selected clips, preserving relative positions and group IDs."""
+        """Duplicate all selected clips, preserving relative positions and group hierarchy."""
         selected = [i.clip for i in self.scene.selectedItems() if isinstance(i, ClipItem)]
         if not selected:
             return
@@ -822,25 +889,86 @@ class TimelineWidget(QGraphicsView):
                             nc.group_id = group_map[nc.group_id]
                         new_clips.append(nc)
                 st.clips.extend(new_clips)
+        # Mirror group hierarchy for duplicated groups
+        for old_gid, new_gid in group_map.items():
+            old_parent = self.project.groups.get(old_gid, "")
+            self.project.groups[new_gid] = group_map.get(old_parent, old_parent)
         self.refresh()
         self.project_changed.emit()
 
-    def _group_selected(self):
-        """Assign a shared group_id to all selected clips (compound clip)."""
+    # ── group helpers ─────────────────────────────────────────────────
+
+    def _all_clips(self) -> list:
+        result = []
+        for track in self.project.tracks:
+            for st in track.sub_tracks:
+                result.extend(st.clips)
+        return result
+
+    def _clips_in_group(self, gid: str) -> list:
+        return [c for c in self._all_clips() if c.group_id == gid]
+
+    def _group_depth(self, gid: str) -> int:
+        depth, current = 0, gid
+        visited = set()
+        while current in self.project.groups and self.project.groups[current]:
+            current = self.project.groups[current]
+            depth += 1
+            if current in visited or depth > 10:
+                break
+            visited.add(current)
+        return depth
+
+    def _cmd_g(self):
+        """
+        Cmd+G smart toggle:
+          • All selected in same group → ungroup (clips bubble up to parent)
+          • All selected in sub-groups sharing a common parent → ungroup that parent
+          • Otherwise (some ungrouped, or groups with no shared parent) → create new group
+        """
         items = [i for i in self.scene.selectedItems() if isinstance(i, ClipItem)]
         if len(items) < 2:
             return
-        gid = str(uuid.uuid4())[:8]
-        for item in items:
-            item.clip.group_id = gid
-        self.refresh()
-        self.project_changed.emit()
 
-    def _ungroup_selected(self):
-        """Remove group_id from selected clips."""
-        items = [i for i in self.scene.selectedItems() if isinstance(i, ClipItem)]
-        for item in items:
-            item.clip.group_id = ""
+        direct_gids  = {i.clip.group_id for i in items}
+        non_empty    = {g for g in direct_gids if g}
+
+        if not non_empty:
+            # All ungrouped → create group
+            gid = str(uuid.uuid4())[:8]
+            for item in items:
+                item.clip.group_id = gid
+            self.project.groups[gid] = ""
+
+        elif len(direct_gids) == 1:
+            # All in the exact same group → ungroup one level
+            gid    = next(iter(direct_gids))
+            parent = self.project.groups.pop(gid, "")
+            for item in items:
+                item.clip.group_id = parent
+
+        else:
+            # Check whether all non-empty groups share a single parent
+            parents = {self.project.groups.get(g, "") for g in non_empty}
+            shared  = next(iter(parents)) if len(parents) == 1 else None
+
+            if shared and "" not in direct_gids:
+                # All sub-groups share one parent → ungroup the parent
+                self.project.groups.pop(shared, None)
+                for g in non_empty:
+                    if self.project.groups.get(g) == shared:
+                        self.project.groups[g] = ""
+            else:
+                # Wrap everything in a new parent group
+                new_gid = str(uuid.uuid4())[:8]
+                for item in items:
+                    g = item.clip.group_id
+                    if g:
+                        self.project.groups[g] = new_gid
+                    else:
+                        item.clip.group_id = new_gid
+                self.project.groups[new_gid] = ""
+
         self.refresh()
         self.project_changed.emit()
 
@@ -891,10 +1019,8 @@ class TimelineWidget(QGraphicsView):
             self._delete_selected_clips()
         elif ctrl and key == Qt.Key_A:
             self._select_all()
-        elif ctrl and shift and key == Qt.Key_G:
-            self._ungroup_selected()
         elif ctrl and key == Qt.Key_G:
-            self._group_selected()
+            self._cmd_g()
         elif ctrl and key == Qt.Key_D:
             self._duplicate_selected()
         elif key == Qt.Key_Home:
@@ -930,12 +1056,22 @@ class TimelineWidget(QGraphicsView):
     def contextMenuEvent(self, event):
         scene_pos = self.mapToScene(event.pos())
 
+        # Markers get priority — their own contextMenuEvent is suppressed at item level
+        marker_item = next(
+            (i for i in self.scene.items(scene_pos) if isinstance(i, MarkerItem)),
+            None,
+        )
+        if marker_item:
+            marker_item._show_context_menu(self)
+            event.accept()
+            return
+
         clip_item = next(
             (i for i in self.scene.items(scene_pos) if isinstance(i, ClipItem)),
             None,
         )
 
-        menu = QMenu()
+        menu = QMenu(self)
         menu.setStyleSheet(_MENU_SS)
 
         if clip_item:
@@ -943,12 +1079,9 @@ class TimelineWidget(QGraphicsView):
             dup_act = menu.addAction("Duplicate Clip")
             spl_act = menu.addAction(f"Split at {self._playhead_time:.2f}s")
             menu.addSeparator()
-            if clip_item.clip.group_id:
-                ug_act  = menu.addAction("Ungroup")
-                grp_act = None
-            else:
-                grp_act = menu.addAction("Group with Selected")
-                ug_act  = None
+            grp_act = menu.addAction(
+                "Ungroup (Cmd+G)" if clip_item.clip.group_id else "Group with Selected (Cmd+G)"
+            )
             act = menu.exec(QCursor.pos())
             if act == del_act:
                 self._delete_clip(clip_item.clip)
@@ -956,14 +1089,10 @@ class TimelineWidget(QGraphicsView):
                 self._duplicate_clip(clip_item.clip)
             elif act == spl_act:
                 self._split_clip_at(clip_item.clip, self._playhead_time)
-            elif act is not None and act == grp_act:
+            elif act == grp_act:
                 if not clip_item.isSelected():
                     clip_item.setSelected(True)
-                self._group_selected()
-            elif act is not None and act == ug_act:
-                if not clip_item.isSelected():
-                    clip_item.setSelected(True)
-                self._ungroup_selected()
+                self._cmd_g()
         else:
             track_idx = self._track_idx_at_y(scene_pos.y())
             t = max(0.0, scene_pos.x() / PIXELS_PER_SECOND)
@@ -975,10 +1104,11 @@ class TimelineWidget(QGraphicsView):
             if sel_items:
                 menu.addSeparator()
                 menu.addAction("Delete Selected")
-                menu.addAction("Group Selected")
+                menu.addAction("Group/Ungroup Selected (Cmd+G)")
                 menu.addAction("Duplicate Selected")
             act = menu.exec(QCursor.pos())
             if act is None:
+                event.accept()
                 return
             text = act.text()
             if act == mark_act:
@@ -989,8 +1119,8 @@ class TimelineWidget(QGraphicsView):
                 self._add_track()
             elif text == "Delete Selected":
                 self._delete_selected_clips()
-            elif text == "Group Selected":
-                self._group_selected()
+            elif text == "Group/Ungroup Selected (Cmd+G)":
+                self._cmd_g()
             elif text == "Duplicate Selected":
                 self._duplicate_selected()
 

@@ -144,6 +144,8 @@ class Project:
     output_config: OutputConfig = field(default_factory=OutputConfig)
     tracks: List[Track] = field(default_factory=list)
     markers: List[TimelineMarker] = field(default_factory=list)
+    # group_id → parent_group_id ("" = top-level).  Populated by _cmd_g().
+    groups: dict = field(default_factory=dict)
 
     def save_to_file(self, filepath: str):
         with open(filepath, 'w') as f:
@@ -161,6 +163,7 @@ class Project:
             output_config=OutputConfig(**data.get('output_config', {})),
             spatial_map=[SpatialSegment(**s) for s in data.get('spatial_map', [])],
             markers=[TimelineMarker(**m) for m in data.get('markers', [])],
+            groups=data.get('groups', {}),
         )
 
         for t_data in data.get('tracks', []):

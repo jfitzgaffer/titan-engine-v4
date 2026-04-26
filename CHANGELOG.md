@@ -1,5 +1,33 @@
 # Changelog
 
+## [2026-04-25] - Zoom-aware rendering, marker context menu, nested group hierarchy
+
+### Added
+- `widgets/timeline.py` — `AudioTrackItem.set_spectrogram_data(rgb)`: stores raw (h, w, 3) uint8 RGB array; replaces `set_spectrogram_image` as the live signal target; zoom-aware re-render via `_get_spectrogram_image(zoom_x)` using numpy column/row index resampling
+- `widgets/timeline.py` — `AudioTrackItem._get_spectrogram_image(zoom_x)` and `_get_waveform_image(zoom_x)`: both compute `target_w = int(scene_w * zoom_x)` (device pixels) from `painter.worldTransform().m11()`; images render 1-to-1 with screen pixels at any zoom level; caches invalidated when width drifts >2%
+- `widgets/timeline.py` — `MarkerItem._show_context_menu(parent_widget)`: rename / change color / delete; accepts a proper Qt parent so `QInputDialog` and `QColorDialog` are modal to the main window
+- `widgets/timeline.py` — `TimelineWidget._cmd_g()`: smart Cmd+G toggle — all same group → ungroup one level; all sub-groups sharing parent → ungroup that parent; otherwise → create new parent group; replaces separate `_group_selected()` / `_ungroup_selected()`
+- `widgets/timeline.py` — `_draw_group_border(gid, items)`: draws colored `QGraphicsRectItem` outline around each group's clips; solid / dashed / dotted pen by nesting depth; Z-value 1.0–1.9 (clips at Z=2)
+- `widgets/timeline.py` — `_group_depth(gid)`, `_all_clips()`, `_clips_in_group(gid)` helpers for border drawing and group hierarchy traversal
+- `widgets/timeline.py` — `TimelineWidget.set_spectrogram_data(rgb)` passthrough to `_audio_item`
+- `models/project.py` — `Project.groups: dict` field (`group_id → parent_group_id`, `""` = top-level); persisted in `.titanproj` and restored in `load_from_file()`
+
+### Changed
+- `main.py` — `AudioAnalysisWorker.__init__` now sets `self._w = target_width` (was missing, causing AttributeError in `_spectrogram()`); default 4000 columns
+- `main.py` — `AudioAnalysisWorker._spectrogram()` returns `np.ndarray` (h, w, 3) uint8 instead of `QImage`; `spectrogram_ready` signal now carries the array; connected to `timeline.set_spectrogram_data` instead of `set_spectrogram_image`
+- `widgets/timeline.py` — `AudioTrackItem.paint()` calls `painter.worldTransform().m11()` to pass `zoom_x` into both image getters — images never upscale-blur regardless of zoom level
+- `widgets/timeline.py` — `refresh()` preserves `_spec_data`, `_spec_cache`, `_spec_cache_w`, `_waveform_rms`, `_waveform_hop_sec` across scene rebuilds (was only preserving legacy `_spec_image`/`_wave_image`)
+- `widgets/timeline.py` — `contextMenuEvent` checks for `MarkerItem` first, calls `marker._show_context_menu(self)` — marker right-click was previously eaten by `event.accept()` before the item's own handler could fire
+- `widgets/timeline.py` — `add_marker` default `name` changed `"Marker"` → `""` (blank label by default)
+- `widgets/timeline.py` — `keyPressEvent` Ctrl+G now calls `_cmd_g()`; Ctrl+Shift+G shortcut removed
+- `widgets/timeline.py` — `_populate_scene()` assigns `ClipItem.setZValue(2)` so group-border rects (Z ≤ 1.9) render behind clips
+- `widgets/timeline.py` — `_duplicate_selected()` now copies group hierarchy entries into `project.groups` for duplicated groups
+
+### Fixed
+- Spectrogram and waveform getting blurry on zoom-in: images are now rendered at device-pixel resolution every time the cached width is stale, eliminating upscale blur
+- Marker right-click had no effect: view-level `contextMenuEvent` called `event.accept()` unconditionally, preventing `MarkerItem.contextMenuEvent` from firing; now handled explicitly in view before the clip check
+- `AudioAnalysisWorker._spectrogram()` crashed with `AttributeError: '_w'` because `__init__` never set the attribute
+
 ## [2026-04-25] - Sharp waveform rendering + frequency band filter
 
 ### Added

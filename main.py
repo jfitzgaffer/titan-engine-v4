@@ -63,10 +63,11 @@ class AudioAnalysisWorker(QThread):
     tempo_map_ready   = Signal(object)        # list[(time_sec, bpm)]
     duration_ready    = Signal(float)         # total audio length in seconds
 
-    def __init__(self, audio_path: str, target_height: int = 80):
+    def __init__(self, audio_path: str, target_height: int = 80, target_width: int = 4000):
         super().__init__()
         self._path = audio_path
         self._h = target_height
+        self._w = target_width
 
     def run(self):
         try:
@@ -85,7 +86,7 @@ class AudioAnalysisWorker(QThread):
             tempo_map         = self._build_tempo_map(mono, sr)
             bpm               = tempo_map[0][1] if tempo_map else self._detect_bpm(mono, sr)
 
-            if spec_img:          self.spectrogram_ready.emit(spec_img)
+            if spec_img is not None:  self.spectrogram_ready.emit(spec_img)
             if rms is not None:   self.waveform_ready.emit(rms, hop_sec)
             if tempo_map:         self.tempo_map_ready.emit(tempo_map)
             if bpm > 0:           self.bpm_ready.emit(bpm)
@@ -94,7 +95,8 @@ class AudioAnalysisWorker(QThread):
 
     # ---- spectrogram ------------------------------------------------
 
-    def _spectrogram(self, mono, sr) -> QImage | None:
+    def _spectrogram(self, mono, sr) -> np.ndarray | None:
+        """Return a (h, w, 3) uint8 RGB array for zoom-aware rendering in the timeline."""
         n_fft  = 2048
         n_freq = n_fft // 2 + 1
         hop    = max(1, len(mono) // self._w)
@@ -120,9 +122,7 @@ class AudioAnalysisWorker(QThread):
         rgb = np.stack([(r * 255).astype(np.uint8),
                         (g * 255).astype(np.uint8),
                         (b * 255).astype(np.uint8)], axis=2)
-        h, w = rgb.shape[:2]
-        img = QImage(rgb.tobytes(), w, h, w * 3, QImage.Format_RGB888)
-        return img.copy()
+        return rgb
 
     # ---- waveform ---------------------------------------------------
 
@@ -529,7 +529,7 @@ class MainWindow(QMainWindow):
 
         # Start fresh analysis
         self._analysis_worker = AudioAnalysisWorker(dest_str, target_height=80)
-        self._analysis_worker.spectrogram_ready.connect(self.timeline.set_spectrogram_image)
+        self._analysis_worker.spectrogram_ready.connect(self.timeline.set_spectrogram_data)
         self._analysis_worker.waveform_ready.connect(self.timeline.set_waveform_data)
         self._analysis_worker.audio_data_ready.connect(self._on_audio_data_ready)
         self._analysis_worker.bpm_ready.connect(self._on_bpm_detected)
