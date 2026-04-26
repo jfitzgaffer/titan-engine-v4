@@ -61,7 +61,7 @@ class TransportBar(QWidget):
 
         self.btn_open_audio = QPushButton("Open Audio…")
         self.btn_open_audio.setStyleSheet(open_style)
-        self.btn_open_audio.setToolTip("Load WAV / FLAC / OGG as backing track")
+        self.btn_open_audio.setToolTip("Load WAV / FLAC / OGG / MP3 as backing track")
 
         self.audio_label = QLabel("No audio loaded")
         self.audio_label.setStyleSheet(
@@ -111,29 +111,24 @@ class TransportBar(QWidget):
         self.btn_play_pause.setChecked(False)
         self.btn_play_pause.setText("▶")
 
-    def _open_audio_dialog(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open Audio File", "",
-            "Audio Files (*.wav *.flac *.ogg *.aif *.aiff);;All Files (*)",
-        )
-        if not path:
-            return
-
-        was_playing = self.controller and self.controller.is_playing
-        if was_playing:
-            self.controller.pause()
-
-        if self.controller and self.controller.load_audio(path):
-            self.audio_label.setText(Path(path).name)
+    def set_audio_state(self, name: str, ok: bool = True):
+        """Called by MainWindow after audio is loaded (or fails)."""
+        if ok:
+            self.audio_label.setText(name)
             self.audio_label.setStyleSheet("color: #00ff66; font-size: 11px; border: none;")
-            self.audio_loaded.emit(path)
-            if was_playing:
-                self.controller.play()
         else:
-            self.audio_label.setText("Failed to load audio")
+            self.audio_label.setText(f"Failed: {name}")
             self.audio_label.setStyleSheet(
                 "color: #ff5555; font-size: 11px; border: none; font-style: italic;"
             )
+
+    def _open_audio_dialog(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Audio File", "",
+            "Audio Files (*.wav *.flac *.ogg *.aif *.aiff *.mp3);;All Files (*)",
+        )
+        if path:
+            self.audio_loaded.emit(path)
 
     def _refresh_display(self):
         if not self.controller:

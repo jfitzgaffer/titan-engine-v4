@@ -1,5 +1,31 @@
 # Changelog
 
+## [2026-04-24] - MP3 support, audio crash fix, markers, snap, compound clips, dynamic timeline
+
+### Added
+- `playback.py` — `load_audio_any(path)`: tries soundfile first, falls back to pydub for MP3/AAC; raises with install instructions if both fail
+- `widgets/transport.py` — `*.mp3` added to file dialog filter; `set_audio_state(name, ok)` method so MainWindow controls the label; loading delegated entirely to `_on_audio_loaded` in main.py
+- `models/project.py` — `TimelineMarker` dataclass (`time_sec`, `name`, `color_hex`); `group_id: str` field on `Clip`; `markers: List[TimelineMarker]` on `Project`; both persisted via `asdict()` and restored in `load_from_file()`
+- `widgets/timeline.py` — `MarkerItem(QGraphicsItem)`: draggable vertical flag line; right-click to rename, change color (QColorDialog), or delete; synced to `project.markers`
+- `widgets/timeline.py` — `set_scene_duration(seconds)`: extends `SCENE_WIDTH` if audio is longer than 50 s; called from `_on_audio_duration` signal
+- `widgets/timeline.py` — Snap-to-grid (16th-note resolution): toggle with `S` key; applies to clip drag and new clip placement
+- `widgets/timeline.py` — Compound clips: `Ctrl+G` groups selected clips (shared `group_id`); grouped clips move together; `Ctrl+Shift+G` ungroup; gold `G` badge drawn on grouped clips
+- `widgets/timeline.py` — `Ctrl+D` duplicates all selected clips preserving relative positions and re-mapping group IDs
+- `main.py` — `_stop_analysis_worker()`: graceful `quit()+wait(2s)` before `terminate()` fallback; used in `_on_audio_loaded` and `closeEvent`
+- `main.py` — `_on_audio_duration(seconds)` signal handler: calls `timeline.set_scene_duration()`
+- `main.py` — `_reconnect_controller()`: reconnects only `seek_requested → controller.seek` after a project reload (fixes double-connect crash)
+- `main.py` — `M` key global shortcut: places a marker at the current playhead time
+- `AudioAnalysisWorker` — `duration_ready = Signal(float)` emitted before analysis; uses `load_audio_any` instead of `sf.read` directly; `target_width` increased from 2000 → 4000 for higher waveform resolution
+
+### Fixed
+- Crash when loading audio after a project is opened: `_wire_signals()` was called in both `__init__` and `_reload_project()`, creating duplicate `transport.audio_loaded → _on_audio_loaded` connections; second call to `terminate()` on a running QThread caused macOS segfault. Fix: `_wire_signals()` is called only once; `_reload_project` uses `_reconnect_controller()` instead
+- `closeEvent` used `terminate()` on a running worker; now uses `_stop_analysis_worker()` (graceful quit + wait)
+- MP3 files were grayed out in the file dialog (soundfile doesn't decode MP3); now handled via pydub fallback
+
+### Changed
+- `_on_audio_loaded`: copies audio file to `media/` directory for project portability; sets `project.audio.file_path`; project open auto-loads saved audio if the file still exists
+- `_reload_project`: no longer calls `_wire_signals()` — uses `_reconnect_controller()` for the one signal that references the new controller object
+
 ## [2026-04-24] - Ruler seek, left properties panel, live preview, combined play/pause, spacebar, audio spectrogram track
 
 ### Added

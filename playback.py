@@ -14,6 +14,41 @@ except ImportError:
     logger.warning("sounddevice/soundfile not installed — audio playback disabled, perf_counter clock active")
 
 
+def load_audio_any(path: str):
+    """
+    Load audio from any supported format. Returns (float32_array, sample_rate).
+    Tries soundfile first (WAV/FLAC/OGG/AIFF), falls back to pydub for MP3/AAC.
+    Raises RuntimeError if both fail.
+    """
+    import numpy as np
+    try:
+        import soundfile as _sf
+        data, sr = _sf.read(path, dtype='float32', always_2d=True)
+        return data, sr
+    except Exception as sf_err:
+        pass
+
+    try:
+        from pydub import AudioSegment
+        seg = AudioSegment.from_file(path)
+        sr = seg.frame_rate
+        raw = np.array(seg.get_array_of_samples(), dtype=np.float32)
+        if seg.sample_width == 2:
+            raw /= 32768.0
+        elif seg.sample_width == 4:
+            raw /= 2147483648.0
+        channels = seg.channels
+        data = raw.reshape(-1, channels) if channels > 1 else raw.reshape(-1, 1)
+        return data, sr
+    except ImportError:
+        raise RuntimeError(
+            f"MP3 / AAC support requires pydub + ffmpeg. "
+            f"Install with: pip install pydub  (and brew install ffmpeg)"
+        )
+    except Exception as pd_err:
+        raise RuntimeError(f"Audio load failed: {pd_err}")
+
+
 class PlaybackController:
     """
     Timeline clock and render driver.
@@ -48,12 +83,12 @@ class PlaybackController:
     # ------------------------------------------------------------------
 
     def load_audio(self, path: str) -> bool:
-        """Load a WAV/FLAC/OGG file. Returns True on success."""
+        """Load any supported audio file (WAV/FLAC/OGG/MP3). Returns True on success."""
         if not _AUDIO_AVAILABLE:
-            logger.warning("Cannot load audio: sounddevice/soundfile not installed.")
+            logger.warning("Cannot load audio: sounddevice not installed.")
             return False
         try:
-            data, sr = sf.read(path, dtype='float32', always_2d=True)
+            data, sr = load_audio_any(path)
             with self._audio_lock:
                 self._audio_data = data
                 self._audio_sr = sr

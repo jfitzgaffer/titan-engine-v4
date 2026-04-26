@@ -74,6 +74,7 @@ class Clip:
     duration: float
     params: ParameterSet = field(default_factory=ParameterSet)
     pixels: List[VirtualPixel] = field(default_factory=lambda: [VirtualPixel()])
+    group_id: str = ""   # non-empty → clips sharing same group_id move together
 
 
 @dataclass
@@ -97,6 +98,13 @@ class Track:
 # ---------------------------------------------------------
 # 3. PROJECT & CONFIGURATION
 # ---------------------------------------------------------
+
+@dataclass
+class TimelineMarker:
+    time_sec: float = 0.0
+    name: str = ""
+    color_hex: str = "#ffdc32"
+
 
 @dataclass
 class AudioReference:
@@ -135,6 +143,7 @@ class Project:
     spatial_map: List[SpatialSegment] = field(default_factory=list)
     output_config: OutputConfig = field(default_factory=OutputConfig)
     tracks: List[Track] = field(default_factory=list)
+    markers: List[TimelineMarker] = field(default_factory=list)
 
     def save_to_file(self, filepath: str):
         with open(filepath, 'w') as f:
@@ -151,6 +160,7 @@ class Project:
             audio=AudioReference(**data.get('audio', {})),
             output_config=OutputConfig(**data.get('output_config', {})),
             spatial_map=[SpatialSegment(**s) for s in data.get('spatial_map', [])],
+            markers=[TimelineMarker(**m) for m in data.get('markers', [])],
         )
 
         for t_data in data.get('tracks', []):
@@ -173,6 +183,7 @@ class Project:
                         duration=c_data.get('duration', 1.0),
                         params=ParameterSet(**c_data.get('params', {})),
                         pixels=[VirtualPixel(**p) for p in c_data.get('pixels', [])],
+                        group_id=c_data.get('group_id', ''),
                     )
                     subtrack.clips.append(clip)
                 track.sub_tracks.append(subtrack)

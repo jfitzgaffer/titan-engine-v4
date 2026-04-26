@@ -6,6 +6,8 @@ Pipeline: ProjectModel → SpatialMapper → CompositorEngine
 """
 import sys
 import logging
+import shutil
+from pathlib import Path
 
 import numpy as np
 from PySide6.QtWidgets import (
@@ -22,7 +24,7 @@ from models.project import (
 )
 from spatial import PhysicalFixture, SpatialMapper
 from compositor import CompositorEngine
-from playback import PlaybackController
+from playback import PlaybackController, load_audio_any
 from output.output_manager import OutputManager
 from widgets.transport import TransportBar
 from widgets.timeline import TimelineWidget
@@ -35,6 +37,8 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+_MEDIA_DIR = Path(__file__).parent / "media"
 
 
 # ------------------------------------------------------------------
@@ -49,16 +53,16 @@ class FrameBridge(QObject):
 # ------------------------------------------------------------------
 class AudioAnalysisWorker(QThread):
     """
-    Background audio analysis: spectrogram, waveform, and BPM.
-    All three are computed from the same audio load in one pass.
-    Uses only numpy + soundfile — no librosa required.
+    Background audio analysis: spectrogram, waveform, BPM, and duration.
+    Uses load_audio_any so MP3 files are supported.
     """
     spectrogram_ready = Signal(object)   # QImage
     waveform_ready    = Signal(object)   # QImage
     bpm_ready         = Signal(float)
     tempo_map_ready   = Signal(object)   # list[(time_sec, bpm)]
+    duration_ready    = Signal(float)    # total audio length in seconds
 
-    def __init__(self, audio_path: str, target_width: int = 2000, target_height: int = 80):
+    def __init__(self, audio_path: str, target_width: int = 4000, target_height: int = 80):
         super().__init__()
         self._path = audio_path
         self._w = target_width
@@ -66,17 +70,20 @@ class AudioAnalysisWorker(QThread):
 
     def run(self):
         try:
-            import soundfile as sf
-        except ImportError:
-            logger.warning("soundfile not installed — audio analysis unavailable")
+            data, sr = load_audio_any(self._path)
+            mono = data.mean(axis=1)
+        except Exception as e:
+            logger.warning(f"Audio analysis: could not load '{self._path}': {e}")
             return
         try:
-            data, sr = sf.read(self._path, dtype='float32', always_2d=True)
-            mono = data.mean(axis=1)
-            spec_img   = self._spectrogram(mono, sr)
-            wave_img   = self._waveform(mono)
-            tempo_map  = self._build_tempo_map(mono, sr)
-            bpm        = tempo_map[0][1] if tempo_map else self._detect_bpm(mono, sr)
+            duration_secs = len(data) / sr
+            self.duration_ready.emit(duration_secs)
+
+            spec_img  = self._spectrogram(mono, sr)
+            wave_img  = self._waveform(mono)
+            tempo_map = self._build_tempo_map(mono, sr)
+            bpm       = tempo_map[0][1] if tempo_map else self._detect_bpm(mono, sr)
+
             if spec_img:  self.spectrogram_ready.emit(spec_img)
             if wave_img:  self.waveform_ready.emit(wave_img)
             if tempo_map: self.tempo_map_ready.emit(tempo_map)
@@ -119,13 +126,11 @@ class AudioAnalysisWorker(QThread):
     # ---- waveform ---------------------------------------------------
 
     def _waveform(self, mono) -> QImage | None:
-        # Downsample to target_width RMS buckets
         bucket = max(1, len(mono) // self._w)
         n = (len(mono) // bucket) * bucket
         rms = np.sqrt(np.mean(
             mono[:n].reshape(-1, bucket) ** 2, axis=1
         ))
-        # Resize to exactly target_width
         xs = np.linspace(0, len(rms) - 1, self._w)
         rms = rms[xs.astype(int)]
         peak = rms.max()
@@ -138,7 +143,7 @@ class AudioAnalysisWorker(QThread):
             half = int(rms[x] * mid)
             y0 = max(0, mid - half)
             y1 = min(self._h, mid + half + 1)
-            img_arr[y0:y1, x] = [0, 180, 100]   # green waveform
+            img_arr[y0:y1, x] = [0, 180, 100]
 
         img = QImage(img_arr.tobytes(), self._w, self._h,
                      self._w * 3, QImage.Format_RGB888)
@@ -152,15 +157,14 @@ class AudioAnalysisWorker(QThread):
         if n_frames < 8:
             return 0.0
 
-        # RMS onset envelope
         env = np.sqrt(np.mean(
             mono[: n_frames * hop].reshape(n_frames, hop) ** 2, axis=1
         ))
         env -= env.mean()
 
         fps = sr / hop
-        min_p = max(1, int(fps * 60 / 200))   # 200 BPM upper limit
-        max_p = int(fps * 60 / 60)             # 60 BPM lower limit
+        min_p = max(1, int(fps * 60 / 200))
+        max_p = int(fps * 60 / 60)
 
         if max_p >= len(env):
             return 0.0
@@ -176,11 +180,6 @@ class AudioAnalysisWorker(QThread):
     # ---- variable tempo map -----------------------------------------
 
     def _build_tempo_map(self, mono, sr) -> list:
-        """
-        Slice audio into overlapping 4-second windows; detect BPM per window.
-        Merge consecutive windows within 2% of each other to find change points.
-        Returns [(time_sec, bpm), …] sorted by time, or [] if detection fails.
-        """
         win_sec = 4.0
         hop_sec = 2.0
         win_n   = int(win_sec * sr)
@@ -199,7 +198,6 @@ class AudioAnalysisWorker(QThread):
         if not raw:
             return []
 
-        # Merge windows: keep only where BPM changes by > 2 %
         merged = [(0.0, raw[0][1])]
         for time_sec, bpm in raw[1:]:
             if abs(bpm - merged[-1][1]) / merged[-1][1] > 0.02:
@@ -308,12 +306,12 @@ class MainWindow(QMainWindow):
             file_menu.addAction(a)
             return a
 
-        act("New Project",    "Ctrl+N",       self._action_new)
-        act("Open Project…",  "Ctrl+O",       self._action_open)
-        act("Save Project",   "Ctrl+S",       self._action_save)
-        act("Save Project As…","Ctrl+Shift+S", self._action_save_as)
+        act("New Project",     "Ctrl+N",        self._action_new)
+        act("Open Project…",   "Ctrl+O",        self._action_open)
+        act("Save Project",    "Ctrl+S",        self._action_save)
+        act("Save Project As…","Ctrl+Shift+S",  self._action_save_as)
         file_menu.addSeparator()
-        act("Open Audio…",    slot=lambda: self.transport.btn_open_audio.click())
+        act("Open Audio…",     slot=lambda: self.transport.btn_open_audio.click())
 
     # ------------------------------------------------------------------
     # UI layout
@@ -325,21 +323,17 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # Transport bar (full width)
         self.transport = TransportBar(self.controller)
         root.addWidget(self.transport)
 
-        # Main area: horizontal split [properties | DAW+visualizer]
         h_split = QSplitter(Qt.Horizontal)
         h_split.setStyleSheet("QSplitter::handle { background: #333; width: 2px; }")
 
-        # Left: properties panel (always visible, shows "no selection" state)
         self.properties = PropertiesPanel()
         self.properties.setMinimumWidth(200)
         self.properties.setMaximumWidth(320)
         h_split.addWidget(self.properties)
 
-        # Right: vertical split [headers+timeline | visualizer]
         right = QWidget()
         right.setStyleSheet("background: #1a1a1a;")
         right_vbox = QVBoxLayout(right)
@@ -374,7 +368,7 @@ class MainWindow(QMainWindow):
         root.addWidget(h_split, stretch=1)
 
     # ------------------------------------------------------------------
-    # Signal wiring
+    # Signal wiring  (called once from __init__ only)
     # ------------------------------------------------------------------
     def _wire_signals(self):
         self.timeline.seek_requested.connect(self.controller.seek)
@@ -386,7 +380,6 @@ class MainWindow(QMainWindow):
         self.properties.params_changed.connect(self._render_current_frame)
         self.properties.clip_layout_changed.connect(self.timeline.refresh)
         self.properties.clip_layout_changed.connect(self._render_current_frame)
-
         self.headers.audio_header.view_mode_changed.connect(self.timeline.set_audio_view_mode)
         self.headers.audio_header.bpm_grid_toggled.connect(self.timeline.set_bpm_grid_visible)
 
@@ -398,9 +391,20 @@ class MainWindow(QMainWindow):
             (Qt.Key_L,     self.controller.play),
             (Qt.Key_V,     lambda: self.timeline.set_tool("select")),
             (Qt.Key_B,     lambda: self.timeline.set_tool("blade")),
+            (Qt.Key_M,     lambda: self.timeline.add_marker(self.controller.playhead_time)),
         ]:
             s = QShortcut(QKeySequence(key), self)
             s.activated.connect(slot)
+
+    def _reconnect_controller(self):
+        """Reconnect seek_requested to the new self.controller after a project reload."""
+        try:
+            self.timeline.seek_requested.disconnect()
+        except RuntimeError:
+            pass
+        self.timeline.seek_requested.connect(self.controller.seek)
+        self.timeline.seek_requested.connect(self.timeline.update_playhead)
+        self.timeline.seek_requested.connect(self._render_current_frame)
 
     # ------------------------------------------------------------------
     # Slots
@@ -422,8 +426,7 @@ class MainWindow(QMainWindow):
     def _render_current_frame(self, *_):
         """
         Re-render at the current playhead position and push to the visualizer.
-        If the playhead is outside the selected clip's range, preview at the
-        clip midpoint so parameter edits are always immediately visible.
+        Falls back to the selected clip's midpoint when playhead is outside the clip.
         """
         t = self.controller.playhead_time
         if self._selected_clip is not None:
@@ -438,19 +441,60 @@ class MainWindow(QMainWindow):
             logger.warning(f"Live preview error: {e}")
 
     def _on_audio_loaded(self, path: str):
-        from pathlib import Path
-        self.headers.audio_header.set_filename(Path(path).name)
+        """
+        Handle audio file selection:
+        1. Copy file into media/ for project portability
+        2. Load into playback controller
+        3. Save path in project model
+        4. Start background analysis (spectrogram, waveform, BPM, duration)
+        """
+        src = Path(path)
+        _MEDIA_DIR.mkdir(exist_ok=True)
+        dest = _MEDIA_DIR / src.name
 
-        if self._analysis_worker and self._analysis_worker.isRunning():
-            self._analysis_worker.terminate()
+        # Copy if not already in media/
+        try:
+            if src.resolve() != dest.resolve():
+                shutil.copy2(src, dest)
+            dest_str = str(dest)
+        except Exception as e:
+            logger.warning(f"Could not copy audio to media/: {e}")
+            dest_str = path   # fall back to original path
 
-        self._analysis_worker = AudioAnalysisWorker(path, target_width=2000, target_height=80)
+        # Load into playback controller
+        was_playing = self.controller.is_playing
+        if was_playing:
+            self.controller.pause()
+        ok = self.controller.load_audio(dest_str)
+        self.transport.set_audio_state(src.name, ok)
+        if was_playing and ok:
+            self.controller.play()
+
+        if not ok:
+            return
+
+        # Persist in project
+        self.project.audio.file_path = dest_str
+
+        # Update header label
+        self.headers.audio_header.set_filename(src.name)
+
+        # Stop any running analysis worker gracefully
+        self._stop_analysis_worker()
+
+        # Start fresh analysis
+        self._analysis_worker = AudioAnalysisWorker(dest_str, target_width=4000, target_height=80)
         self._analysis_worker.spectrogram_ready.connect(self.timeline.set_spectrogram_image)
         self._analysis_worker.waveform_ready.connect(self.timeline.set_waveform_image)
         self._analysis_worker.bpm_ready.connect(self._on_bpm_detected)
         self._analysis_worker.tempo_map_ready.connect(self.timeline.set_tempo_map)
+        self._analysis_worker.duration_ready.connect(self._on_audio_duration)
         self._analysis_worker.start()
-        logger.info(f"Audio analysis started for {Path(path).name}")
+        logger.info(f"Audio analysis started for {src.name}")
+
+    def _on_audio_duration(self, seconds: float):
+        self.timeline.set_scene_duration(seconds)
+        logger.info(f"Audio duration: {seconds:.1f}s — timeline extended")
 
     def _on_bpm_detected(self, bpm: float):
         bpm_rounded = round(bpm, 1)
@@ -460,15 +504,24 @@ class MainWindow(QMainWindow):
 
     def _on_project_changed(self):
         """Rebuild track header panel when tracks are added or removed."""
-        # Rebuild the headers widget in-place inside the existing daw_row layout
         old_headers = self.headers
         self.headers = TrackHeaderPanel(self.project)
         layout = old_headers.parentWidget().layout()
         layout.replaceWidget(old_headers, self.headers)
         old_headers.deleteLater()
-        # Re-wire audio header view-mode signal
         self.headers.audio_header.view_mode_changed.connect(self.timeline.set_audio_view_mode)
         self.headers.audio_header.bpm_grid_toggled.connect(self.timeline.set_bpm_grid_visible)
+
+    def _stop_analysis_worker(self):
+        """Gracefully stop any running analysis worker."""
+        if not self._analysis_worker:
+            return
+        if self._analysis_worker.isRunning():
+            self._analysis_worker.quit()
+            if not self._analysis_worker.wait(2000):
+                self._analysis_worker.terminate()
+                self._analysis_worker.wait(500)
+        self._analysis_worker = None
 
     # ------------------------------------------------------------------
     # File menu actions
@@ -502,6 +555,13 @@ class MainWindow(QMainWindow):
         self._save_path = path
         self._reload_project(project, mapper)
 
+        # Auto-load saved audio if still accessible
+        audio_path = project.audio.file_path
+        if audio_path and Path(audio_path).exists():
+            self._on_audio_loaded(audio_path)
+        elif audio_path:
+            logger.warning(f"Saved audio not found: {audio_path}")
+
     def _action_save(self):
         if self._save_path:
             self._save_to(self._save_path)
@@ -526,6 +586,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Save failed", str(e))
 
     def _reload_project(self, project: Project, mapper: SpatialMapper):
+        """Replace the active project without re-running full _wire_signals()."""
         self.controller.stop()
         self.project = project
         self.mapper = mapper
@@ -543,13 +604,13 @@ class MainWindow(QMainWindow):
         self.timeline.refresh()
         self.properties.clear()
         self.setWindowTitle(f"Titan Engine v4 — {project.name}")
-        self._wire_signals()
+        # Reconnect only the signals that reference self.controller
+        self._reconnect_controller()
 
     def closeEvent(self, event):
         self.controller.stop()
         self.output_manager.close()
-        if self._analysis_worker and self._analysis_worker.isRunning():
-            self._analysis_worker.terminate()
+        self._stop_analysis_worker()
         logger.info("Shutdown complete")
         super().closeEvent(event)
 
