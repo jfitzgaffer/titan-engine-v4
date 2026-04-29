@@ -1,5 +1,16 @@
 # Changelog
 
+## [2026-04-28] - MIDI import (sheet music → timeline)
+
+### Added
+- `midi_import.py` — `import_midi(path, project, replace=False)`: parses a `.mid` file and appends Tracks to the project using the hybrid strategy: one Track per MIDI channel, one SubTrack per unique pitch within that channel, one Clip per note event; `SubTrack.pitch_ratio` is normalised 0–1 within each channel's pitch range so high notes always map to one end of a fixture bar; `Clip.params.dim` carries the note velocity (0–1); drum channel (ch 10) labels SubTracks with GM drum names (Kick, Snare, Hi-Hat, etc.); handles multi-tempo MIDI files correctly via a full tempo-map accumulator; unclosed note_on events (notes without note_off) are closed at track end
+- `midi_import.py` — `midi_duration_seconds(path)`: returns total playback length in seconds; used to extend the timeline scene after import
+- `main.py` — `File → Import MIDI… (Ctrl+I)`: file-picker dialog; asks Replace / Append / Cancel; calls `import_midi`; extends scene to cover MIDI duration; rebuilds compositor and header panel; shows summary dialog with track count
+- `requirements.txt` — lists all pip dependencies: PySide6, numpy, soundfile, sounddevice, pydub, mido
+
+### Changed
+- `main.py` — imports `import_midi`, `midi_duration_seconds` from `midi_import`
+
 ## [2026-04-25] - Zoom-aware rendering, marker context menu, nested group hierarchy
 
 ### Added

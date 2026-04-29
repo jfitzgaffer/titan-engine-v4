@@ -22,6 +22,7 @@ from models.project import (
     Project, Track, SubTrack, Clip,
     ParameterSet, VirtualPixel, SpatialSegment,
 )
+from midi_import import import_midi, midi_duration_seconds
 from spatial import PhysicalFixture, SpatialMapper
 from compositor import CompositorEngine
 from playback import PlaybackController, load_audio_any
@@ -356,6 +357,7 @@ class MainWindow(QMainWindow):
         act("Save Project As…","Ctrl+Shift+S",  self._action_save_as)
         file_menu.addSeparator()
         act("Open Audio…",     slot=lambda: self.transport.btn_open_audio.click())
+        act("Import MIDI…",    "Ctrl+I",        self._action_import_midi)
 
     # ------------------------------------------------------------------
     # UI layout
@@ -650,6 +652,60 @@ class MainWindow(QMainWindow):
         if path:
             self._save_path = path
             self._save_to(path)
+
+    def _action_import_midi(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import MIDI File", "",
+            "MIDI Files (*.mid *.midi);;All Files (*)",
+        )
+        if not path:
+            return
+
+        reply = QMessageBox.question(
+            self, "Import MIDI",
+            "Replace existing tracks, or append imported tracks?\n\n"
+            "• Yes = Replace all tracks\n• No = Append to existing tracks",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+        )
+        if reply == QMessageBox.Cancel:
+            return
+        replace = (reply == QMessageBox.Yes)
+
+        try:
+            n_tracks = import_midi(path, self.project, replace=replace)
+        except RuntimeError as e:
+            QMessageBox.critical(self, "MIDI import failed", str(e))
+            return
+        except Exception as e:
+            QMessageBox.critical(self, "MIDI import failed",
+                                 f"Could not parse MIDI file:\n{e}")
+            return
+
+        if n_tracks == 0:
+            QMessageBox.warning(self, "MIDI import",
+                                "No note events found in this file.")
+            return
+
+        # Extend timeline to cover the MIDI file's duration
+        dur = midi_duration_seconds(path)
+        if dur > 0:
+            self.timeline.set_scene_duration(dur)
+
+        # Rebuild compositor and UI for the updated project
+        self.compositor = CompositorEngine(self.project, self.mapper)
+        self.controller.compositor = self.compositor
+        self.timeline.project = self.project
+        self.timeline.refresh()
+        self._on_project_changed()
+
+        logger.info(f"MIDI import: {n_tracks} track(s) from {Path(path).name}")
+        QMessageBox.information(
+            self, "MIDI import complete",
+            f"Imported {n_tracks} track(s) from {Path(path).name}.\n\n"
+            "Each MIDI channel → one Track.\n"
+            "Each unique pitch → one SubTrack.\n"
+            "Each note event → one Clip.",
+        )
 
     def _save_to(self, path: str):
         try:

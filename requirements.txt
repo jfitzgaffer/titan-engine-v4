@@ -1,0 +1,6 @@
+PySide6
+numpy
+soundfile
+sounddevice
+pydub
+mido
